@@ -1,0 +1,11 @@
+name: daily-arxiv-agent
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pydantic
+  - pytest
+  - setuptools
+  - wheel
+

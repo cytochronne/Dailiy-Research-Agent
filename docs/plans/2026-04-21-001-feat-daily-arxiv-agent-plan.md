@@ -176,7 +176,8 @@ Prerequisite for push: configure a git remote before the first accepted phase is
 ## Dependencies / Prerequisites
 
 - Git remote must be configured before the first accepted phase can be pushed.
-- Baseline Python dependencies should include `pytest`, `pydantic`, `httpx`, `feedparser` or equivalent Atom parsing support, `scikit-learn`, `pymupdf`, and `streamlit`.
+- All Python development must run inside the `daily-arxiv-agent` conda environment.
+- Baseline Python dependencies should include `pytest`, `pydantic`, `httpx`, `feedparser` or equivalent Atom parsing support, `scikit-learn`, `pymupdf`, and `streamlit`. Prefer conda packages when available; use pip only inside the conda environment.
 - LLM-backed extraction and explanation require credentials for the chosen provider; tests must use the fake provider and not require live credentials.
 - Live arXiv calls require network access; fixture-backed tests must remain available for offline development.
 
@@ -194,6 +195,7 @@ Prerequisite for push: configure a git remote before the first accepted phase is
 - Create: `pyproject.toml`
 - Create: `.gitignore`
 - Create: `.env.example`
+- Create: `environment.yml`
 - Create: `README.md`
 - Create: `src/daily_arxiv_agent/__init__.py`
 - Create: `src/daily_arxiv_agent/contracts.py`

@@ -183,7 +183,7 @@ Prerequisite for push: configure a git remote before the first accepted phase is
 
 ## Implementation Units
 
-- [ ] **Unit 0: Project Scaffold and Delivery Workflow**
+- [x] **Unit 0: Project Scaffold and Delivery Workflow**
 
 **Goal:** Create the baseline Python project structure, testing setup, local configuration pattern, and staged delivery documentation.
 
@@ -226,7 +226,7 @@ Prerequisite for push: configure a git remote before the first accepted phase is
 - README explains how to set up, run tests, run the demo, and follow staged acceptance.
 - User accepts the scaffold and delivery workflow, then the phase is committed and pushed.
 
-- [ ] **Unit 1: arXiv Retrieval and Local Storage**
+- [x] **Unit 1: arXiv Retrieval and Local Storage**
 
 **Goal:** Retrieve arXiv papers by date range, topic/keyword/category, normalize metadata, and persist/reuse results locally.
 

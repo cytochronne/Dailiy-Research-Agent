@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <title>ArXiv Query: search_query=cat:cs.LG</title>
+  <id>http://arxiv.org/api/query?search_query=cat:cs.LG</id>
+  <updated>2026-04-21T00:00:00-05:00</updated>
+  <opensearch:totalResults xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">2</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/2604.00001v1</id>
+    <updated>2026-04-20T12:00:00Z</updated>
+    <published>2026-04-20T10:00:00Z</published>
+    <title>
+      Explainable Agents for Daily Research Briefings
+    </title>
+    <summary>
+      We study agent workflows for explainable research-paper recommendation.
+    </summary>
+    <author>
+      <name>Ada Lovelace</name>
+    </author>
+    <author>
+      <name>Alan Turing</name>
+    </author>
+    <arxiv:primary_category term="cs.LG"/>
+    <category term="cs.LG"/>
+    <category term="cs.AI"/>
+    <link href="http://arxiv.org/abs/2604.00001v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2604.00001v1" rel="related" type="application/pdf"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2604.00002v2</id>
+    <updated>2026-04-19T09:00:00Z</updated>
+    <published>2026-04-18T08:30:00Z</published>
+    <title>Retrieval-Augmented Topic Tracking</title>
+    <summary>
+      This paper presents retrieval methods for monitoring scientific topics.
+    </summary>
+    <author>
+      <name>Grace Hopper</name>
+    </author>
+    <arxiv:primary_category term="cs.IR"/>
+    <category term="cs.IR"/>
+    <link href="http://arxiv.org/abs/2604.00002v2" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2604.00002v2" rel="related" type="application/pdf"/>
+  </entry>
+</feed>

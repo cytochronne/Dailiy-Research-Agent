@@ -34,3 +34,21 @@ Plan file: `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`
 - Conda environment: `daily-arxiv-agent`
 - Editable install: passed with `conda run -n daily-arxiv-agent python -m pip install -e . --no-build-isolation --no-deps`
 - Tests: `8 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+
+## Unit 1 Acceptance Checklist
+
+- [x] Fixture-backed Atom parsing returns normalized paper metadata.
+- [x] Retrieval query construction supports topic, category, date range, pagination, and submitted-date sorting.
+- [x] SQLite storage persists paper metadata and retrieval result sets.
+- [x] Follow-up filtering can reuse stored papers by topic, category, and date range.
+- [x] Empty arXiv responses return a successful empty result.
+- [x] Network/API failures return structured fallback results with failed query metadata.
+- [x] Malformed Atom responses return structured fallback results without corrupting storage.
+- [x] Manual acceptance artifact exists at `docs/demo/unit1-sample-retrieval.md`.
+- [x] User accepts Unit 1 before commit and push.
+
+## Unit 1 Verification Record
+
+- Conda environment: `daily-arxiv-agent`
+- Tests: `18 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+- Manual artifact: fixture-backed sample retrieval for topic `agents`, category `cs.LG`, submitted-date range `2026-04-18` to `2026-04-21`

@@ -38,6 +38,24 @@ class Provenance(BaseModel):
     query: str | None = None
 
 
+class RetrievalQuery(BaseModel):
+    """Normalized arXiv retrieval inputs."""
+
+    topic: str | None = None
+    category: str | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    start_index: int = Field(default=0, ge=0)
+    max_results: int = Field(default=20, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> "RetrievalQuery":
+        if self.start_date is not None and self.end_date is not None:
+            if self.start_date > self.end_date:
+                raise ValueError("start_date must be before or equal to end_date")
+        return self
+
+
 class SkillError(BaseModel):
     """Structured error information that can be shown or logged."""
 
@@ -97,4 +115,3 @@ class SkillResult(BaseModel, Generic[DataT]):
         if self.status in {SkillStatus.ERROR, SkillStatus.FALLBACK} and self.error is None:
             raise ValueError("error or fallback SkillResult must include an error")
         return self
-

@@ -6,7 +6,7 @@ Local Agent + Skills project for daily arXiv paper monitoring, recommendation, f
 
 This repository is being built in staged units from `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`.
 
-Current stage: Unit 0, project scaffold and delivery workflow.
+Current stage: Unit 1, arXiv retrieval and local storage.
 
 ## Setup
 
@@ -32,6 +32,51 @@ Copy `.env.example` to `.env` for local settings. Keep real secrets out of git.
 
 ```bash
 conda run -n daily-arxiv-agent python -m pytest
+```
+
+## arXiv Retrieval and Local Storage
+
+Unit 1 adds an independently testable retrieval Skill and SQLite store:
+
+- `daily_arxiv_agent.skills.arxiv_retrieval.ArxivRetrievalSkill`
+- `daily_arxiv_agent.storage.SQLitePaperStore`
+- `daily_arxiv_agent.contracts.RetrievalQuery`
+
+The retrieval Skill supports topic, category, submitted-date range, pagination, Atom parsing, local caching, and structured fallback results. It stores normalized metadata only; PDFs are not downloaded in this unit.
+
+Example:
+
+```python
+from datetime import date
+
+from daily_arxiv_agent.contracts import RetrievalQuery
+from daily_arxiv_agent.skills.arxiv_retrieval import ArxivRetrievalSkill
+from daily_arxiv_agent.storage import SQLitePaperStore
+
+store = SQLitePaperStore("data/daily_arxiv.sqlite3")
+skill = ArxivRetrievalSkill(store=store)
+result = skill.retrieve(
+    RetrievalQuery(
+        topic="agent briefing",
+        category="cs.LG",
+        start_date=date(2026, 4, 18),
+        end_date=date(2026, 4, 21),
+        max_results=10,
+    )
+)
+
+papers = result.data or []
+```
+
+Follow-up filtering can reuse stored papers without a new arXiv request:
+
+```python
+stored = store.find_papers(
+    topic="briefing",
+    category="cs.LG",
+    start_date=date(2026, 4, 18),
+    end_date=date(2026, 4, 21),
+)
 ```
 
 ## Planned Demo

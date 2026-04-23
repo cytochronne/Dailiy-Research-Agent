@@ -52,3 +52,25 @@ Plan file: `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`
 - Conda environment: `daily-arxiv-agent`
 - Tests: `18 passed` with `conda run -n daily-arxiv-agent python -m pytest`
 - Manual artifact: fixture-backed sample retrieval for topic `agents`, category `cs.LG`, submitted-date range `2026-04-18` to `2026-04-21`
+
+## Unit 2 Acceptance Checklist
+
+- [x] Deterministic keyword ranking ranks title/abstract matches above unrelated papers.
+- [x] Top-K recommendations include rank, score, rationale, evidence source, and paper provenance.
+- [x] Fewer papers than Top-K returns all available papers without error.
+- [x] Missing abstracts use metadata evidence labels and avoid fabricated method details.
+- [x] Structured extraction runs behind the LLM provider boundary with a deterministic fake provider.
+- [x] LLM extraction failures return fallback extraction output with a clear error.
+- [x] Daily briefing generation includes an executive summary, summary table, highlighted paper, and all ranked paper references.
+- [x] Briefing-level LLM summary failures return fallback briefing output with a clear error.
+- [x] Extraction fallback status propagates to the daily briefing result.
+- [x] Manual acceptance artifact exists at `docs/demo/unit2-daily-briefing.md`.
+- [x] User requested code review, commit, and push for Unit 2.
+
+## Unit 2 Verification Record
+
+- Conda environment: `daily-arxiv-agent`
+- Tests: `29 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+- Review: `/ce-code-review` found one briefing fallback propagation issue; fixed before commit.
+- Commit: `10ad446 feat(ranking): add topic briefing MVP`
+- Manual artifact: generated daily briefing MVP for topic `agent briefing` using deterministic keyword ranking and the fake LLM provider.

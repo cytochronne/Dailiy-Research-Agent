@@ -1,6 +1,7 @@
 from datetime import date
 
 from daily_arxiv_agent.contracts import PaperMetadata, Provenance, RetrievalQuery
+from daily_arxiv_agent.skills.seed_parsing import SeedParsingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
 
 
@@ -63,3 +64,17 @@ def test_sqlite_store_filters_papers_for_followup_queries(tmp_path) -> None:
     )
 
     assert loaded == [matching]
+
+
+def test_sqlite_store_persists_seed_preference_for_later_reuse(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    preference = SeedParsingSkill(metadata_client=None).build_preference(
+        ["Agent workflows for research paper recommendation"],
+        profile_id="demo",
+    ).data
+
+    assert preference is not None
+    store.save_seed_preference(preference)
+    loaded = store.load_seed_preference("demo")
+
+    assert loaded == preference

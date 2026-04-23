@@ -8,7 +8,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterable
 
-from .contracts import PaperMetadata, RetrievalQuery
+from .contracts import PaperMetadata, RetrievalQuery, SeedPreference
 
 
 class SQLitePaperStore:
@@ -50,6 +50,12 @@ class SQLitePaperStore:
                     position INTEGER NOT NULL,
                     PRIMARY KEY (query_key, paper_id),
                     FOREIGN KEY (paper_id) REFERENCES papers(paper_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS seed_preferences (
+                    profile_id TEXT PRIMARY KEY,
+                    preference_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -176,6 +182,41 @@ class SQLitePaperStore:
             return True
 
         return [paper for paper in papers if matches(paper)]
+
+    def save_seed_preference(self, preference: SeedPreference) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO seed_preferences (
+                    profile_id,
+                    preference_json,
+                    updated_at
+                )
+                VALUES (?, ?, ?)
+                ON CONFLICT(profile_id) DO UPDATE SET
+                    preference_json = excluded.preference_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    preference.profile_id,
+                    preference.model_dump_json(),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def load_seed_preference(self, profile_id: str = "default") -> SeedPreference | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT preference_json
+                FROM seed_preferences
+                WHERE profile_id = ?
+                """,
+                (profile_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return SeedPreference.model_validate_json(row["preference_json"])
 
     @staticmethod
     def query_key(query: RetrievalQuery) -> str:

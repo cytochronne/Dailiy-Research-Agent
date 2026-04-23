@@ -2,6 +2,7 @@ from datetime import date
 
 from daily_arxiv_agent.contracts import EvidenceSource, PaperMetadata, Provenance, SkillStatus
 from daily_arxiv_agent.skills.ranking import TopicRankingSkill
+from daily_arxiv_agent.skills.seed_parsing import SeedParsingSkill
 
 
 def make_paper(
@@ -87,3 +88,57 @@ def test_missing_abstract_uses_metadata_evidence_label() -> None:
     recommendation = (result.data or [])[0]
     assert recommendation.evidence_source == EvidenceSource.METADATA
     assert result.evidence_source == EvidenceSource.METADATA
+
+
+def test_seed_preference_ranks_similar_papers_without_explicit_topic() -> None:
+    similar = make_paper(
+        "2604.00001",
+        "Agent Workflows for Research Paper Recommendation",
+        "Daily briefing systems can rank papers using agent preference signals.",
+    )
+    unrelated = make_paper(
+        "2604.00002",
+        "A Survey of Compiler Register Allocation",
+        "This work studies low-level optimization in compilers.",
+    )
+    preference_result = SeedParsingSkill(metadata_client=None).build_preference(
+        ["Agent workflows for research paper recommendation"]
+    )
+    preference = preference_result.data
+
+    result = TopicRankingSkill().rank(
+        [unrelated, similar],
+        seed_preference=preference,
+        top_k=2,
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    recommendations = result.data or []
+    assert [item.paper.paper_id for item in recommendations] == ["2604.00001", "2604.00002"]
+    assert recommendations[0].score > recommendations[1].score
+    assert "seed-paper similarity" in recommendations[0].rationale.lower()
+    assert result.metadata["ranking_mode"] == "seed"
+
+
+def test_hybrid_topic_and_seed_ranking_combines_both_rationales() -> None:
+    paper = make_paper(
+        "2604.00001",
+        "Agent Workflows for Research Paper Recommendation",
+        "Daily briefing systems can rank papers using agent preference signals.",
+    )
+    preference = SeedParsingSkill(metadata_client=None).build_preference(
+        ["research paper recommendation"]
+    ).data
+
+    result = TopicRankingSkill().rank(
+        [paper],
+        topic="agent briefing",
+        seed_preference=preference,
+        top_k=1,
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    recommendation = (result.data or [])[0]
+    assert "matched explicit terms" in recommendation.rationale.lower()
+    assert "seed-paper similarity" in recommendation.rationale.lower()
+    assert result.metadata["ranking_mode"] == "hybrid_topic_seed"

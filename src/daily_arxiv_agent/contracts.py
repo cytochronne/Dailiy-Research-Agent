@@ -87,6 +87,49 @@ class PaperMetadata(BaseModel):
         return self
 
 
+class SeedRecord(BaseModel):
+    """One normalized seed contribution for personalization."""
+
+    identity: str
+    input_text: str
+    input_type: str
+    paper_id: str | None = None
+    title: str | None = None
+    abstract: str | None = None
+    paper: PaperMetadata | None = None
+    preference_text: str
+
+    @model_validator(mode="after")
+    def require_preference_text(self) -> "SeedRecord":
+        if not self.identity.strip():
+            raise ValueError("seed identity must not be blank")
+        if not self.preference_text.strip():
+            raise ValueError("seed preference_text must not be blank")
+        return self
+
+
+class SeedPreference(BaseModel):
+    """User interest representation built from normalized seed papers."""
+
+    profile_id: str = "default"
+    seeds: list[SeedRecord] = Field(default_factory=list)
+    preference_text: str
+    vector: dict[str, float] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="after")
+    def require_seed_signal(self) -> "SeedPreference":
+        if not self.profile_id.strip():
+            raise ValueError("profile_id must not be blank")
+        if not self.seeds:
+            raise ValueError("seed preference must include at least one seed")
+        if not self.preference_text.strip():
+            raise ValueError("seed preference_text must not be blank")
+        if not self.vector:
+            raise ValueError("seed preference vector must not be empty")
+        return self
+
+
 class Recommendation(BaseModel):
     """Ranked recommendation for one paper."""
 

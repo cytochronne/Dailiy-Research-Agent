@@ -11,33 +11,76 @@ from daily_arxiv_agent.contracts import (
     EvidenceSource,
     PaperMetadata,
     Recommendation,
+    SeedPreference,
+    SkillError,
     SkillResult,
     SkillStatus,
+)
+from daily_arxiv_agent.skills.seed_parsing import (
+    DeterministicTextVectorizer,
+    build_paper_preference_text,
+    cosine_similarity,
 )
 
 
 class TopicRankingSkill:
-    """Rank papers by explicit topic and keyword overlap."""
+    """Rank papers by explicit topic, seed-paper similarity, or both."""
+
+    def __init__(
+        self,
+        *,
+        vectorizer: DeterministicTextVectorizer | None = None,
+        seed_similarity_weight: float = 10.0,
+    ) -> None:
+        self.vectorizer = vectorizer or DeterministicTextVectorizer()
+        self.seed_similarity_weight = seed_similarity_weight
 
     def rank(
         self,
         papers: Sequence[PaperMetadata],
         *,
-        topic: str,
+        topic: str | None = None,
+        seed_preference: SeedPreference | None = None,
         top_k: int = 5,
     ) -> SkillResult[list[Recommendation]]:
+        if not (topic and topic.strip()) and seed_preference is None:
+            return SkillResult[list[Recommendation]](
+                status=SkillStatus.ERROR,
+                data=[],
+                evidence_source=EvidenceSource.METADATA,
+                error=SkillError(
+                    code="ranking_input_missing",
+                    message="Ranking requires a topic, a seed preference, or both.",
+                    retryable=False,
+                ),
+                metadata={"topic": topic, "top_k": top_k},
+            )
+
         if not papers:
             return SkillResult[list[Recommendation]](
                 status=SkillStatus.EMPTY,
                 data=[],
                 evidence_source=EvidenceSource.METADATA,
                 message="No papers are available for ranking.",
-                metadata={"topic": topic, "top_k": top_k},
+                metadata={
+                    "topic": topic,
+                    "top_k": top_k,
+                    "seed_profile_id": seed_preference.profile_id
+                    if seed_preference
+                    else None,
+                },
             )
 
-        query_terms = _tokenize(topic)
+        query_terms = _tokenize(topic or "")
         scored = [
-            _score_paper(paper, query_terms=query_terms, topic=topic)
+            _score_paper(
+                paper,
+                query_terms=query_terms,
+                topic=topic or "",
+                seed_preference=seed_preference,
+                vectorizer=self.vectorizer,
+                seed_similarity_weight=self.seed_similarity_weight,
+            )
             for paper in papers
         ]
         scored.sort(
@@ -71,7 +114,14 @@ class TopicRankingSkill:
             data=recommendations,
             evidence_source=result_evidence,
             provenance=[item.paper.provenance for item in recommendations],
-            metadata={"topic": topic, "top_k": top_k},
+            metadata={
+                "topic": topic,
+                "top_k": top_k,
+                "seed_profile_id": seed_preference.profile_id
+                if seed_preference
+                else None,
+                "ranking_mode": _ranking_mode(topic, seed_preference),
+            },
         )
 
 
@@ -95,6 +145,9 @@ def _score_paper(
     *,
     query_terms: list[str],
     topic: str,
+    seed_preference: SeedPreference | None,
+    vectorizer: DeterministicTextVectorizer,
+    seed_similarity_weight: float,
 ) -> _ScoredPaper:
     title_terms = Counter(_tokenize(paper.title))
     abstract_terms = Counter(_tokenize(paper.abstract or ""))
@@ -103,6 +156,7 @@ def _score_paper(
 
     score = 0.0
     matched_terms: list[str] = []
+    seed_similarity = 0.0
     for term in query_terms:
         term_score = title_terms[term] * 3.0 + abstract_terms[term] * 1.0
         if term in category_text:
@@ -119,8 +173,13 @@ def _score_paper(
         if exact_topic in abstract_lower:
             score += 2.0
 
+    if seed_preference is not None:
+        paper_vector = vectorizer.vectorize(build_paper_preference_text(paper))
+        seed_similarity = cosine_similarity(seed_preference.vector, paper_vector)
+        score += seed_similarity * seed_similarity_weight
+
     evidence_source = EvidenceSource.ABSTRACT if paper.abstract else EvidenceSource.METADATA
-    rationale = _rationale(matched_terms, evidence_source)
+    rationale = _rationale(matched_terms, evidence_source, seed_similarity)
     return _ScoredPaper(
         paper=paper,
         score=round(score, 4),
@@ -129,14 +188,23 @@ def _score_paper(
     )
 
 
-def _rationale(matched_terms: list[str], evidence_source: EvidenceSource) -> str:
+def _rationale(
+    matched_terms: list[str],
+    evidence_source: EvidenceSource,
+    seed_similarity: float,
+) -> str:
+    parts: list[str] = []
     if matched_terms:
         terms = ", ".join(sorted(set(matched_terms)))
-        return f"Matched explicit terms: {terms}. Evidence: {evidence_source.value}."
-    return (
-        "No explicit keyword overlap; included to fill the requested top-k. "
-        f"Evidence: {evidence_source.value}."
-    )
+        parts.append(f"Matched explicit terms: {terms}.")
+    elif seed_similarity <= 0:
+        parts.append("No explicit keyword overlap; included to fill the requested top-k.")
+
+    if seed_similarity > 0:
+        parts.append(f"Seed-paper similarity: {seed_similarity:.3f}.")
+
+    parts.append(f"Evidence: {evidence_source.value}.")
+    return " ".join(parts)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -153,3 +221,13 @@ def _normalize_token(token: str) -> str:
 
 def _date_sort_value(value: date | None) -> int:
     return value.toordinal() if value else 0
+
+
+def _ranking_mode(topic: str | None, seed_preference: SeedPreference | None) -> str:
+    has_topic = bool(topic and topic.strip())
+    has_seed = seed_preference is not None
+    if has_topic and has_seed:
+        return "hybrid_topic_seed"
+    if has_seed:
+        return "seed"
+    return "topic"

@@ -6,7 +6,7 @@ Local Agent + Skills project for daily arXiv paper monitoring, recommendation, f
 
 This repository is being built in staged units from `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`.
 
-Current stage: Unit 2, explicit topic ranking and daily briefing MVP.
+Current stage: Unit 3, seed-paper personalization MVP.
 
 ## Setup
 
@@ -110,6 +110,59 @@ briefing = DailyBriefingSkill(provider=FakeLLMProvider()).generate(
 )
 
 daily_briefing = briefing.data
+```
+
+## Seed-Paper Personalization
+
+Unit 3 adds seed parsing, deterministic preference vectors, seed-aware ranking, and SQLite persistence for local reuse:
+
+- `daily_arxiv_agent.skills.seed_parsing.SeedParsingSkill`
+- `daily_arxiv_agent.skills.seed_parsing.DeterministicTextVectorizer`
+- `daily_arxiv_agent.contracts.SeedPreference`
+- `SQLitePaperStore.save_seed_preference(...)`
+- `SQLitePaperStore.load_seed_preference(...)`
+
+Seed inputs support arXiv IDs, arXiv URLs, and title text. arXiv ID/URL seeds attempt metadata resolution when a metadata client is available; title-only seeds still contribute preference text and do not require API success.
+
+Example:
+
+```python
+from daily_arxiv_agent.skills.ranking import TopicRankingSkill
+from daily_arxiv_agent.skills.seed_parsing import SeedParsingSkill
+from daily_arxiv_agent.storage import SQLitePaperStore
+
+seed_result = SeedParsingSkill().build_preference(
+    [
+        "2604.00001",
+        "https://arxiv.org/abs/2604.00002v1",
+        "Agent workflows for research paper recommendation",
+    ],
+    profile_id="default",
+)
+seed_preference = seed_result.data
+
+store = SQLitePaperStore("data/daily_arxiv.sqlite3")
+if seed_preference is not None:
+    store.save_seed_preference(seed_preference)
+
+stored_preference = store.load_seed_preference("default")
+ranking = TopicRankingSkill().rank(
+    papers,
+    seed_preference=stored_preference,
+    top_k=5,
+)
+recommendations = ranking.data or []
+```
+
+Seed ranking can also be combined with explicit topic ranking:
+
+```python
+hybrid = TopicRankingSkill().rank(
+    papers,
+    topic="agent briefing",
+    seed_preference=stored_preference,
+    top_k=5,
+)
 ```
 
 ## Planned Demo

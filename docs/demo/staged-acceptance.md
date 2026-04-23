@@ -74,3 +74,25 @@ Plan file: `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`
 - Review: `/ce-code-review` found one briefing fallback propagation issue; fixed before commit.
 - Commit: `10ad446 feat(ranking): add topic briefing MVP`
 - Manual artifact: generated daily briefing MVP for topic `agent briefing` using deterministic keyword ranking and the fake LLM provider.
+
+## Unit 3 Acceptance Checklist
+
+- [x] Seed parsing accepts arXiv ID, arXiv URL, and title-only seed input.
+- [x] arXiv ID/URL seeds normalize into one canonical paper identity when duplicated.
+- [x] Title-only seeds contribute preference text without requiring metadata fetch success.
+- [x] Seed preference representation includes reusable deterministic vector-like features.
+- [x] Ranking supports seed-only recommendation with seed-similarity rationale.
+- [x] Ranking supports hybrid topic + seed recommendation in one call.
+- [x] Invalid seed input returns a structured validation error without workflow crash.
+- [x] Seed metadata fetch failure falls back to available seed text.
+- [x] SQLite persists and reloads seed preference data for later reuse.
+- [x] Manual acceptance artifact exists at `docs/demo/unit3-seed-personalization.md`.
+- [x] User accepts Unit 3 before commit and push.
+
+## Unit 3 Verification Record
+
+- Conda environment: `daily-arxiv-agent`
+- Tests: `38 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+- Review: `/ce-code-review` completed; one non-blocking URL host-validation hardening suggestion remains.
+- Commit: `8fbd0c3 feat(unit3): add seed-paper personalization workflow`
+- Manual artifact: seed-paper recommendation list generated in `docs/demo/unit3-seed-personalization.md`, including duplicate normalization and seed-similarity ranking evidence.

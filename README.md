@@ -6,7 +6,7 @@ Local Agent + Skills project for daily arXiv paper monitoring, recommendation, f
 
 This repository is being built in staged units from `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`.
 
-Current stage: Unit 4, feedback refinement loop MVP.
+Current stage: Unit 5, agent orchestrator and follow-up query MVP.
 
 ## Setup
 
@@ -211,6 +211,65 @@ ranking = TopicRankingSkill().rank(
     feedback_events=feedback_events,
     top_k=5,
 )
+```
+
+## Agent Orchestrator, Follow-up Queries, and CLI
+
+Unit 5 adds the shared Agent entry point and non-UI verification commands:
+
+- `daily_arxiv_agent.orchestrator.DailyArxivAgentOrchestrator`
+- `daily_arxiv_agent.skills.followup.FollowupSkill`
+- `daily_arxiv_agent.skills.followup.FollowupQuery`
+- `daily-arxiv-agent demo`
+- `daily-arxiv-agent followup`
+
+The orchestrator returns a standard `SkillResult` whose `data.trace` records each Skill call, input summary, output summary, evidence source, fallback flag, and structured error details when present.
+
+Example recommendation workflow:
+
+```python
+from daily_arxiv_agent.contracts import RetrievalQuery
+from daily_arxiv_agent.orchestrator import DailyArxivAgentOrchestrator
+from daily_arxiv_agent.storage import SQLitePaperStore
+
+store = SQLitePaperStore("data/daily_arxiv.sqlite3")
+agent = DailyArxivAgentOrchestrator(store=store)
+
+result = agent.run_recommendation(
+    RetrievalQuery(topic="agent briefing", category="cs.LG", max_results=10),
+    top_k=5,
+)
+
+workflow = result.data
+trace = workflow.trace if workflow else []
+```
+
+Example follow-up workflow:
+
+```python
+from daily_arxiv_agent.skills.followup import FollowupQuery
+
+followup = agent.run_followup_query(
+    FollowupQuery(
+        topic="graph neural networks",
+        category="cs.LG",
+        start_date=None,
+        end_date=None,
+    )
+)
+```
+
+Follow-up queries search the local SQLite paper store first. Retrieval is only attempted when no stored paper matches and `fetch_if_empty=True`.
+
+Fixture-backed CLI demo:
+
+```bash
+daily-arxiv-agent demo \
+  --fixture tests/fixtures/arxiv_atom_response.xml \
+  --topic agents \
+  --category cs.LG \
+  --top-k 2 \
+  --no-cache
 ```
 
 ## Planned Demo

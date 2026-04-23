@@ -114,3 +114,21 @@ Plan file: `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`
 - Conda environment: `daily-arxiv-agent`
 - Tests: `48 passed` with `conda run -n daily-arxiv-agent python -m pytest`
 - Manual artifact: before/after feedback comparison generated in `docs/demo/unit4-feedback-refinement.md`, including rank movement, score deltas, and rationale text.
+
+## Unit 5 Acceptance Checklist
+
+- [x] Recommendation workflow calls retrieval, ranking, extraction, and briefing in order.
+- [x] Workflow trace records each Skill call, input summary, output summary, evidence source, fallback status, and structured error details.
+- [x] Feedback refinement workflow records feedback and returns updated recommendations through the orchestrator.
+- [x] Follow-up topic/date queries filter stored papers without unnecessary retrieval.
+- [x] Empty local follow-up results trigger retrieval when configured, or a clear fallback when retrieval is unavailable.
+- [x] Skill failures appear in workflow trace and return top-level fallback output.
+- [x] CLI fixture demo runs a workflow end to end.
+- [x] Manual acceptance artifact exists at `docs/demo/unit5-workflow-trace.md`.
+- [ ] User accepts Unit 5 before commit and push.
+
+## Unit 5 Verification Record
+
+- Conda environment: `daily-arxiv-agent`
+- Tests: `60 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+- Manual artifact: workflow trace output generated in `docs/demo/unit5-workflow-trace.md`, including recommendation trace, follow-up local reuse, feedback refinement coverage, and fallback visibility.

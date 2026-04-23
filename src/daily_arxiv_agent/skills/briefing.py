@@ -31,6 +31,7 @@ class DailyBriefingSkill:
         *,
         topic: str,
         recommendations: Sequence[Recommendation],
+        extraction_results: Sequence[SkillResult[PaperBriefingItem]] | None = None,
     ) -> SkillResult[DailyBriefing]:
         if not recommendations:
             briefing = DailyBriefing(
@@ -46,11 +47,12 @@ class DailyBriefingSkill:
                 metadata={"topic": topic},
             )
 
-        extraction_skill = PaperExtractionSkill(provider=self.provider)
-        extraction_results = [
-            extraction_skill.extract(recommendation, topic=topic)
-            for recommendation in recommendations
-        ]
+        if extraction_results is None:
+            extraction_skill = PaperExtractionSkill(provider=self.provider)
+            extraction_results = [
+                extraction_skill.extract(recommendation, topic=topic)
+                for recommendation in recommendations
+            ]
         extracted_items = [
             result.data for result in extraction_results if result.data is not None
         ]

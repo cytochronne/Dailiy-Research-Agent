@@ -96,3 +96,21 @@ Plan file: `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`
 - Review: `/ce-code-review` completed; one non-blocking URL host-validation hardening suggestion remains.
 - Commit: `8fbd0c3 feat(unit3): add seed-paper personalization workflow`
 - Manual artifact: seed-paper recommendation list generated in `docs/demo/unit3-seed-personalization.md`, including duplicate normalization and seed-similarity ranking evidence.
+
+## Unit 4 Acceptance Checklist
+
+- [x] Like feedback increases scores for similar candidate papers.
+- [x] Dislike feedback decreases scores for similar candidate papers.
+- [x] Refined recommendations include previous rank, new rank, score delta, and rationale.
+- [x] Feedback on a paper outside the current result set is recorded without breaking refinement.
+- [x] Conflicting feedback on the same paper follows the documented latest-wins rule.
+- [x] Invalid feedback values return a structured validation error.
+- [x] SQLite persists feedback events for later recommendation calls.
+- [x] Manual acceptance artifact exists at `docs/demo/unit4-feedback-refinement.md`.
+- [ ] User accepts Unit 4 before commit and push.
+
+## Unit 4 Verification Record
+
+- Conda environment: `daily-arxiv-agent`
+- Tests: `48 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+- Manual artifact: before/after feedback comparison generated in `docs/demo/unit4-feedback-refinement.md`, including rank movement, score deltas, and rationale text.

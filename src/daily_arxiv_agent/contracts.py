@@ -5,8 +5,9 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from enum import StrEnum
 from typing import Any, Generic, TypeVar
+from uuid import uuid4
 
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 
 DataT = TypeVar("DataT")
@@ -27,6 +28,13 @@ class SkillStatus(StrEnum):
     EMPTY = "empty"
     FALLBACK = "fallback"
     ERROR = "error"
+
+
+class FeedbackValue(StrEnum):
+    """Allowed paper-level feedback values."""
+
+    LIKE = "like"
+    DISLIKE = "dislike"
 
 
 class Provenance(BaseModel):
@@ -138,6 +146,42 @@ class Recommendation(BaseModel):
     score: float
     rationale: str
     evidence_source: EvidenceSource = EvidenceSource.ABSTRACT
+    previous_rank: int | None = Field(default=None, ge=1)
+    previous_score: float | None = None
+    score_delta: float | None = None
+    rank_delta: int | None = None
+
+
+class FeedbackEvent(BaseModel):
+    """One like/dislike event tied to a recommendation context."""
+
+    event_id: str = Field(default_factory=lambda: uuid4().hex)
+    profile_id: str = "default"
+    recommendation_run_id: str | None = None
+    paper_id: str
+    value: FeedbackValue
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    paper: PaperMetadata | None = None
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def require_feedback_identity(self) -> "FeedbackEvent":
+        if not self.event_id.strip():
+            raise ValueError("feedback event_id must not be blank")
+        if not self.profile_id.strip():
+            raise ValueError("feedback profile_id must not be blank")
+        if not self.paper_id.strip():
+            raise ValueError("feedback paper_id must not be blank")
+        return self
+
+    @field_validator("created_at", mode="after")
+    @classmethod
+    def normalize_created_at(cls, value: datetime) -> datetime:
+        """Normalize feedback timestamps to UTC-aware datetimes."""
+
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
 
 class PaperBriefingItem(BaseModel):

@@ -8,7 +8,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterable
 
-from .contracts import PaperMetadata, RetrievalQuery, SeedPreference
+from .contracts import FeedbackEvent, PaperMetadata, RetrievalQuery, SeedPreference
 
 
 class SQLitePaperStore:
@@ -56,6 +56,16 @@ class SQLitePaperStore:
                     profile_id TEXT PRIMARY KEY,
                     preference_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS feedback_events (
+                    event_id TEXT PRIMARY KEY,
+                    profile_id TEXT NOT NULL,
+                    recommendation_run_id TEXT,
+                    paper_id TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    event_json TEXT NOT NULL
                 );
                 """
             )
@@ -217,6 +227,84 @@ class SQLitePaperStore:
         if row is None:
             return None
         return SeedPreference.model_validate_json(row["preference_json"])
+
+    def save_feedback_event(self, event: FeedbackEvent) -> None:
+        self.save_feedback_events([event])
+
+    def save_feedback_events(self, events: Iterable[FeedbackEvent]) -> None:
+        event_list = list(events)
+        if not event_list:
+            return
+
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO feedback_events (
+                    event_id,
+                    profile_id,
+                    recommendation_run_id,
+                    paper_id,
+                    value,
+                    created_at,
+                    event_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_id) DO UPDATE SET
+                    profile_id = excluded.profile_id,
+                    recommendation_run_id = excluded.recommendation_run_id,
+                    paper_id = excluded.paper_id,
+                    value = excluded.value,
+                    created_at = excluded.created_at,
+                    event_json = excluded.event_json
+                """,
+                [
+                    (
+                        event.event_id,
+                        event.profile_id,
+                        event.recommendation_run_id,
+                        event.paper_id,
+                        event.value.value,
+                        event.created_at.isoformat(),
+                        event.model_dump_json(),
+                    )
+                    for event in event_list
+                ],
+            )
+
+    def list_feedback_events(
+        self,
+        *,
+        profile_id: str = "default",
+        recommendation_run_id: str | None = None,
+    ) -> list[FeedbackEvent]:
+        sql = """
+            SELECT event_json
+            FROM feedback_events
+            WHERE profile_id = ?
+        """
+        params: list[str] = [profile_id]
+        if recommendation_run_id is not None:
+            sql += " AND recommendation_run_id = ?"
+            params.append(recommendation_run_id)
+        sql += " ORDER BY created_at ASC, event_id ASC"
+
+        with self._connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [FeedbackEvent.model_validate_json(row["event_json"]) for row in rows]
+
+    def latest_feedback_by_paper(
+        self,
+        *,
+        profile_id: str = "default",
+        recommendation_run_id: str | None = None,
+    ) -> dict[str, FeedbackEvent]:
+        latest: dict[str, FeedbackEvent] = {}
+        for event in self.list_feedback_events(
+            profile_id=profile_id,
+            recommendation_run_id=recommendation_run_id,
+        ):
+            latest[event.paper_id] = event
+        return latest
 
     @staticmethod
     def query_key(query: RetrievalQuery) -> str:

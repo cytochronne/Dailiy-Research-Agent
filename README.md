@@ -6,7 +6,7 @@ Local Agent + Skills project for daily arXiv paper monitoring, recommendation, f
 
 This repository is being built in staged units from `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`.
 
-Current stage: Unit 3, seed-paper personalization MVP.
+Current stage: Unit 4, feedback refinement loop MVP.
 
 ## Setup
 
@@ -161,6 +161,54 @@ hybrid = TopicRankingSkill().rank(
     papers,
     topic="agent briefing",
     seed_preference=stored_preference,
+    top_k=5,
+)
+```
+
+## Feedback Refinement
+
+Unit 4 adds paper-level like/dislike feedback, SQLite feedback persistence, and explainable refined recommendations:
+
+- `daily_arxiv_agent.skills.feedback.FeedbackRefinementSkill`
+- `daily_arxiv_agent.skills.feedback.FeedbackInput`
+- `daily_arxiv_agent.contracts.FeedbackEvent`
+- `daily_arxiv_agent.contracts.FeedbackValue`
+- `SQLitePaperStore.save_feedback_event(...)`
+- `SQLitePaperStore.list_feedback_events(...)`
+
+Conflicting feedback follows a latest-wins rule per paper. A liked paper pulls similar candidate papers upward; a disliked paper pushes similar candidate papers downward. Refined recommendations include `previous_rank`, `previous_score`, `score_delta`, and `rank_delta`.
+
+Example:
+
+```python
+from daily_arxiv_agent.skills.feedback import FeedbackRefinementSkill
+
+feedback_skill = FeedbackRefinementSkill(store=store)
+refined_result = feedback_skill.refine(
+    recommendations,
+    feedback=[
+        {"paper_id": "2604.00001", "value": "like"},
+        {"paper_id": "2604.00003", "value": "dislike"},
+    ],
+    recommendation_run_id="daily-2026-04-21",
+)
+
+refined_recommendations = refined_result.data or []
+```
+
+Persisted feedback can also be passed into a later ranking call:
+
+```python
+feedback_events = store.list_feedback_events(
+    profile_id="default",
+    recommendation_run_id="daily-2026-04-21",
+)
+
+ranking = TopicRankingSkill().rank(
+    papers,
+    topic="agent briefing",
+    seed_preference=stored_preference,
+    feedback_events=feedback_events,
     top_k=5,
 )
 ```

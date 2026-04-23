@@ -1,6 +1,13 @@
 from datetime import date
 
-from daily_arxiv_agent.contracts import EvidenceSource, PaperMetadata, Provenance, SkillStatus
+from daily_arxiv_agent.contracts import (
+    EvidenceSource,
+    FeedbackEvent,
+    FeedbackValue,
+    PaperMetadata,
+    Provenance,
+    SkillStatus,
+)
 from daily_arxiv_agent.skills.ranking import TopicRankingSkill
 from daily_arxiv_agent.skills.seed_parsing import SeedParsingSkill
 
@@ -142,3 +149,40 @@ def test_hybrid_topic_and_seed_ranking_combines_both_rationales() -> None:
     assert "matched explicit terms" in recommendation.rationale.lower()
     assert "seed-paper similarity" in recommendation.rationale.lower()
     assert result.metadata["ranking_mode"] == "hybrid_topic_seed"
+
+
+def test_feedback_events_can_refine_a_later_ranking_call() -> None:
+    liked = make_paper(
+        "2604.00001",
+        "Agent Workflows for Research Paper Recommendation",
+        "Daily briefing systems can rank papers using agent preference signals.",
+    )
+    similar = make_paper(
+        "2604.00002",
+        "Feedback Agents for Paper Recommendation",
+        "Research briefing agents use feedback signals to rank papers.",
+    )
+    unrelated = make_paper(
+        "2604.00003",
+        "A Survey of Compiler Register Allocation",
+        "This work studies low-level optimization in compilers.",
+    )
+    feedback = FeedbackEvent(
+        profile_id="demo",
+        recommendation_run_id="run-1",
+        paper_id=liked.paper_id,
+        value=FeedbackValue.LIKE,
+        paper=liked,
+    )
+
+    result = TopicRankingSkill().rank(
+        [unrelated, similar],
+        feedback_events=[feedback],
+        top_k=2,
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    recommendations = result.data or []
+    assert [item.paper.paper_id for item in recommendations] == ["2604.00002", "2604.00003"]
+    assert "feedback adjustment" in recommendations[0].rationale.lower()
+    assert result.metadata["ranking_mode"] == "feedback"

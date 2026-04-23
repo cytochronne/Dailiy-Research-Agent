@@ -9,6 +9,7 @@ from typing import Sequence
 
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
+    FeedbackEvent,
     PaperMetadata,
     Recommendation,
     SeedPreference,
@@ -16,6 +17,7 @@ from daily_arxiv_agent.contracts import (
     SkillResult,
     SkillStatus,
 )
+from daily_arxiv_agent.skills.feedback import feedback_adjustment_for_paper
 from daily_arxiv_agent.skills.seed_parsing import (
     DeterministicTextVectorizer,
     build_paper_preference_text,
@@ -31,9 +33,11 @@ class TopicRankingSkill:
         *,
         vectorizer: DeterministicTextVectorizer | None = None,
         seed_similarity_weight: float = 10.0,
+        feedback_weight: float = 6.0,
     ) -> None:
         self.vectorizer = vectorizer or DeterministicTextVectorizer()
         self.seed_similarity_weight = seed_similarity_weight
+        self.feedback_weight = feedback_weight
 
     def rank(
         self,
@@ -41,9 +45,14 @@ class TopicRankingSkill:
         *,
         topic: str | None = None,
         seed_preference: SeedPreference | None = None,
+        feedback_events: Sequence[FeedbackEvent] | None = None,
         top_k: int = 5,
     ) -> SkillResult[list[Recommendation]]:
-        if not (topic and topic.strip()) and seed_preference is None:
+        if (
+            not (topic and topic.strip())
+            and seed_preference is None
+            and not feedback_events
+        ):
             return SkillResult[list[Recommendation]](
                 status=SkillStatus.ERROR,
                 data=[],
@@ -68,6 +77,7 @@ class TopicRankingSkill:
                     "seed_profile_id": seed_preference.profile_id
                     if seed_preference
                     else None,
+                    "feedback_count": len(feedback_events or []),
                 },
             )
 
@@ -78,8 +88,10 @@ class TopicRankingSkill:
                 query_terms=query_terms,
                 topic=topic or "",
                 seed_preference=seed_preference,
+                feedback_events=feedback_events or (),
                 vectorizer=self.vectorizer,
                 seed_similarity_weight=self.seed_similarity_weight,
+                feedback_weight=self.feedback_weight,
             )
             for paper in papers
         ]
@@ -120,7 +132,8 @@ class TopicRankingSkill:
                 "seed_profile_id": seed_preference.profile_id
                 if seed_preference
                 else None,
-                "ranking_mode": _ranking_mode(topic, seed_preference),
+                "feedback_count": len(feedback_events or []),
+                "ranking_mode": _ranking_mode(topic, seed_preference, feedback_events),
             },
         )
 
@@ -146,8 +159,10 @@ def _score_paper(
     query_terms: list[str],
     topic: str,
     seed_preference: SeedPreference | None,
+    feedback_events: Sequence[FeedbackEvent],
     vectorizer: DeterministicTextVectorizer,
     seed_similarity_weight: float,
+    feedback_weight: float,
 ) -> _ScoredPaper:
     title_terms = Counter(_tokenize(paper.title))
     abstract_terms = Counter(_tokenize(paper.abstract or ""))
@@ -178,8 +193,21 @@ def _score_paper(
         seed_similarity = cosine_similarity(seed_preference.vector, paper_vector)
         score += seed_similarity * seed_similarity_weight
 
+    feedback_adjustment = feedback_adjustment_for_paper(
+        paper,
+        feedback_events,
+        vectorizer=vectorizer,
+        feedback_weight=feedback_weight,
+    )
+    score += feedback_adjustment.score_delta
+
     evidence_source = EvidenceSource.ABSTRACT if paper.abstract else EvidenceSource.METADATA
-    rationale = _rationale(matched_terms, evidence_source, seed_similarity)
+    rationale = _rationale(
+        matched_terms,
+        evidence_source,
+        seed_similarity,
+        feedback_adjustment.rationale,
+    )
     return _ScoredPaper(
         paper=paper,
         score=round(score, 4),
@@ -192,6 +220,7 @@ def _rationale(
     matched_terms: list[str],
     evidence_source: EvidenceSource,
     seed_similarity: float,
+    feedback_rationale: str,
 ) -> str:
     parts: list[str] = []
     if matched_terms:
@@ -202,6 +231,9 @@ def _rationale(
 
     if seed_similarity > 0:
         parts.append(f"Seed-paper similarity: {seed_similarity:.3f}.")
+
+    if feedback_rationale:
+        parts.append(f"Feedback adjustment: {feedback_rationale}.")
 
     parts.append(f"Evidence: {evidence_source.value}.")
     return " ".join(parts)
@@ -223,11 +255,24 @@ def _date_sort_value(value: date | None) -> int:
     return value.toordinal() if value else 0
 
 
-def _ranking_mode(topic: str | None, seed_preference: SeedPreference | None) -> str:
+def _ranking_mode(
+    topic: str | None,
+    seed_preference: SeedPreference | None,
+    feedback_events: Sequence[FeedbackEvent] | None,
+) -> str:
     has_topic = bool(topic and topic.strip())
     has_seed = seed_preference is not None
+    has_feedback = bool(feedback_events)
+    if has_topic and has_seed and has_feedback:
+        return "hybrid_topic_seed_feedback"
     if has_topic and has_seed:
         return "hybrid_topic_seed"
+    if has_topic and has_feedback:
+        return "hybrid_topic_feedback"
+    if has_seed and has_feedback:
+        return "seed_feedback"
+    if has_feedback:
+        return "feedback"
     if has_seed:
         return "seed"
     return "topic"

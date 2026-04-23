@@ -1,6 +1,12 @@
 from datetime import date
 
-from daily_arxiv_agent.contracts import PaperMetadata, Provenance, RetrievalQuery
+from daily_arxiv_agent.contracts import (
+    FeedbackEvent,
+    FeedbackValue,
+    PaperMetadata,
+    Provenance,
+    RetrievalQuery,
+)
 from daily_arxiv_agent.skills.seed_parsing import SeedParsingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
 
@@ -78,3 +84,52 @@ def test_sqlite_store_persists_seed_preference_for_later_reuse(tmp_path) -> None
     loaded = store.load_seed_preference("demo")
 
     assert loaded == preference
+
+
+def test_sqlite_store_persists_feedback_events_for_later_reuse(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    paper = make_paper()
+    event = FeedbackEvent(
+        profile_id="demo",
+        recommendation_run_id="run-1",
+        paper_id=paper.paper_id,
+        value=FeedbackValue.LIKE,
+        paper=paper,
+    )
+
+    store.save_feedback_event(event)
+    loaded = store.list_feedback_events(
+        profile_id="demo",
+        recommendation_run_id="run-1",
+    )
+
+    assert loaded == [event]
+
+
+def test_sqlite_store_returns_latest_feedback_by_paper(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    paper = make_paper()
+    first = FeedbackEvent(
+        event_id="event-1",
+        profile_id="demo",
+        recommendation_run_id="run-1",
+        paper_id=paper.paper_id,
+        value=FeedbackValue.LIKE,
+        paper=paper,
+    )
+    second = FeedbackEvent(
+        event_id="event-2",
+        profile_id="demo",
+        recommendation_run_id="run-1",
+        paper_id=paper.paper_id,
+        value=FeedbackValue.DISLIKE,
+        paper=paper,
+    )
+
+    store.save_feedback_events([first, second])
+    latest = store.latest_feedback_by_paper(
+        profile_id="demo",
+        recommendation_run_id="run-1",
+    )
+
+    assert latest[paper.paper_id] == second

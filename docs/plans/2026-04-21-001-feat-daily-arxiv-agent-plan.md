@@ -270,7 +270,7 @@ Prerequisite for push: configure a git remote before the first accepted phase is
 - Manual acceptance artifact: a saved sample retrieval output for one topic/category/date range in `docs/demo/`.
 - User accepts retrieval and storage behavior, then the phase is committed and pushed.
 
-- [ ] **Unit 2: Explicit Topic Ranking and Daily Briefing MVP**
+- [x] **Unit 2: Explicit Topic Ranking and Daily Briefing MVP**
 
 **Goal:** Rank retrieved papers by explicit topic/keyword, extract structured briefing fields, and generate a first daily briefing from metadata and abstracts.
 

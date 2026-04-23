@@ -6,7 +6,7 @@ Local Agent + Skills project for daily arXiv paper monitoring, recommendation, f
 
 This repository is being built in staged units from `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`.
 
-Current stage: Unit 1, arXiv retrieval and local storage.
+Current stage: Unit 2, explicit topic ranking and daily briefing MVP.
 
 ## Setup
 
@@ -77,6 +77,39 @@ stored = store.find_papers(
     start_date=date(2026, 4, 18),
     end_date=date(2026, 4, 21),
 )
+```
+
+## Topic Ranking and Daily Briefing
+
+Unit 2 adds deterministic keyword ranking, structured paper extraction behind an LLM provider boundary, and first-pass daily briefing generation:
+
+- `daily_arxiv_agent.skills.ranking.TopicRankingSkill`
+- `daily_arxiv_agent.skills.extraction.PaperExtractionSkill`
+- `daily_arxiv_agent.skills.briefing.DailyBriefingSkill`
+- `daily_arxiv_agent.llm.fake.FakeLLMProvider`
+
+The default provider is `fake`, so ranking, extraction, briefing generation, and tests run without live LLM credentials. Every briefing item carries an evidence label (`metadata` or `abstract`) and preserves the source arXiv provenance.
+
+Example:
+
+```python
+from daily_arxiv_agent.llm.fake import FakeLLMProvider
+from daily_arxiv_agent.skills.briefing import DailyBriefingSkill
+from daily_arxiv_agent.skills.ranking import TopicRankingSkill
+
+ranking = TopicRankingSkill().rank(
+    papers,
+    topic="agent briefing",
+    top_k=5,
+)
+recommendations = ranking.data or []
+
+briefing = DailyBriefingSkill(provider=FakeLLMProvider()).generate(
+    topic="agent briefing",
+    recommendations=recommendations,
+)
+
+daily_briefing = briefing.data
 ```
 
 ## Planned Demo

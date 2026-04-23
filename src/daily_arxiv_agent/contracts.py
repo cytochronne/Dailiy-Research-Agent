@@ -97,6 +97,47 @@ class Recommendation(BaseModel):
     evidence_source: EvidenceSource = EvidenceSource.ABSTRACT
 
 
+class PaperBriefingItem(BaseModel):
+    """Structured briefing fields extracted for one ranked paper."""
+
+    paper_id: str
+    title: str
+    rank: int = Field(ge=1)
+    score: float
+    summary: str
+    contributions: list[str] = Field(default_factory=list)
+    methods: list[str] = Field(default_factory=list)
+    relevance_rationale: str
+    evidence_source: EvidenceSource
+    provenance: Provenance
+    arxiv_url: HttpUrl
+
+
+class BriefingTableRow(BaseModel):
+    """Compact row used by the daily briefing summary table."""
+
+    rank: int = Field(ge=1)
+    paper_id: str
+    title: str
+    score: float
+    key_reason: str
+    evidence_source: EvidenceSource
+    arxiv_url: HttpUrl
+
+
+class DailyBriefing(BaseModel):
+    """Generated daily briefing from ranked papers and extracted metadata."""
+
+    topic: str
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    executive_summary: str
+    summary_table: list[BriefingTableRow] = Field(default_factory=list)
+    highlighted_paper: PaperBriefingItem | None = None
+    items: list[PaperBriefingItem] = Field(default_factory=list)
+    evidence_source: EvidenceSource | None = None
+    provenance: list[Provenance] = Field(default_factory=list)
+
+
 class SkillResult(BaseModel, Generic[DataT]):
     """Standard result envelope returned by every Skill."""
 

@@ -28,6 +28,22 @@ All future Python packages should be installed into this conda environment. Pref
 
 Copy `.env.example` to `.env` for local settings. Keep real secrets out of git.
 
+For real LLM calls, export your API settings in the shell before running workflows:
+
+```bash
+export LLM_PROVIDER=deepseek
+export LLM_API_KEY="<your-api-key>"
+export LLM_MODEL="deepseek-chat"
+export LLM_BASE_URL="https://api.deepseek.com/v1"
+export LLM_CHAT_COMPLETIONS_PATH="/chat/completions"
+export LLM_MAX_RETRIES=2
+export LLM_RETRY_BACKOFF_SECONDS=1.0
+export LLM_OUTPUT_RETRIES=1
+export LLM_BRIEFING_MAX_RETRIES=4
+export LLM_BRIEFING_RETRY_BACKOFF_SECONDS=1.5
+export LLM_BRIEFING_OUTPUT_RETRIES=2
+```
+
 ## Test
 
 ```bash
@@ -88,7 +104,7 @@ Unit 2 adds deterministic keyword ranking, structured paper extraction behind an
 - `daily_arxiv_agent.skills.briefing.DailyBriefingSkill`
 - `daily_arxiv_agent.llm.fake.FakeLLMProvider`
 
-The default provider is `fake`, so ranking, extraction, briefing generation, and tests run without live LLM credentials. Every briefing item carries an evidence label (`metadata` or `abstract`) and preserves the source arXiv provenance.
+`LLM_PROVIDER=fake` uses deterministic local behavior. `LLM_PROVIDER=openai` and `LLM_PROVIDER=live` require `LLM_API_KEY` or `OPENAI_API_KEY`. Any other non-fake `LLM_PROVIDER` value is treated as a custom OpenAI-compatible Chat Completions API; this keeps local gateways possible when they do not require auth. Every briefing item carries an evidence label (`metadata` or `abstract`) and preserves the source arXiv provenance.
 
 Example:
 
@@ -269,6 +285,17 @@ daily-arxiv-agent demo \
   --topic agents \
   --category cs.LG \
   --top-k 2 \
+  --no-cache
+```
+
+Real API demo (real arXiv + custom LLM API, no fixture):
+
+```bash
+daily-arxiv-agent demo \
+  --topic agents \
+  --category cs.LG \
+  --max-results 10 \
+  --top-k 5 \
   --no-cache
 ```
 

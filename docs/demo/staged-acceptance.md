@@ -130,5 +130,5 @@ Plan file: `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`
 ## Unit 5 Verification Record
 
 - Conda environment: `daily-arxiv-agent`
-- Tests: `60 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+- Tests: `64 passed` with `conda run -n daily-arxiv-agent python -m pytest`
 - Manual artifact: workflow trace output generated in `docs/demo/unit5-workflow-trace.md`, including recommendation trace, follow-up local reuse, feedback refinement coverage, and fallback visibility.

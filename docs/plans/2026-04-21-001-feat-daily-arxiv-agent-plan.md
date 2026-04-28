@@ -181,6 +181,11 @@ Prerequisite for push: configure a git remote before the first accepted phase is
 - LLM-backed extraction and explanation require credentials for the chosen provider; tests must use the fake provider and not require live credentials.
 - Live arXiv calls require network access; fixture-backed tests must remain available for offline development.
 
+## Implementation Change Notes
+
+- 2026-04-23 live API readiness update: real arXiv + real OpenAI LLM path enabled before later units.
+  - See `docs/solutions/2026-04-23-001-live-api-readiness.md` for scope, file-level changes, and downstream constraints for Unit 6/7/8.
+
 ## Implementation Units
 
 - [x] **Unit 0: Project Scaffold and Delivery Workflow**

@@ -92,7 +92,7 @@ This keeps the user-facing workflow inspectable even when one Skill fails.
 conda run -n daily-arxiv-agent python -m pytest
 ```
 
-Result: `60 passed`.
+Result: `64 passed`.
 
 ## Acceptance Notes
 

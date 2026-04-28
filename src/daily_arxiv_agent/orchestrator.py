@@ -97,8 +97,12 @@ class DailyArxivAgentOrchestrator:
         followup_skill: FollowupSkill | None = None,
         provider: LLMProvider | None = None,
     ) -> None:
-        self.store = store or SQLitePaperStore(AppConfig.from_env().db_path)
-        self.retrieval_skill = retrieval_skill or ArxivRetrievalSkill(store=self.store)
+        config = AppConfig.from_env()
+        self.store = store or SQLitePaperStore(config.db_path)
+        self.retrieval_skill = retrieval_skill or ArxivRetrievalSkill(
+            store=self.store,
+            request_delay_seconds=config.arxiv_request_delay_seconds,
+        )
         self.ranking_skill = ranking_skill or TopicRankingSkill()
         self.extraction_skill = extraction_skill or PaperExtractionSkill(provider=provider)
         self.briefing_skill = briefing_skill or DailyBriefingSkill(provider=provider)
@@ -399,12 +403,18 @@ class DailyArxivAgentOrchestrator:
                 data=items,
                 evidence_source=_combined_evidence_from_results(item_results),
                 provenance=[item.provenance for item in items],
-                error=_first_error(item_results) if status == SkillStatus.FALLBACK else None,
+                error=(
+                    _first_error(item_results)
+                    if status in {SkillStatus.FALLBACK, SkillStatus.ERROR}
+                    else None
+                ),
                 message=(
                     "Extracted briefing items."
                     if status == SkillStatus.SUCCESS
                     else "One or more extraction calls used fallback output."
                     if status == SkillStatus.FALLBACK
+                    else "One or more extraction calls failed."
+                    if status == SkillStatus.ERROR
                     else "No briefing items were extracted."
                 ),
                 metadata={"topic": topic, "item_count": len(items)},
@@ -466,7 +476,11 @@ def _workflow_result(
     evidence_source: EvidenceSource | None,
 ) -> SkillResult[ResultT]:
     status = _combined_child_status(results, has_user_data=has_user_data)
-    error = _first_error(results) if status == SkillStatus.FALLBACK else None
+    error = (
+        _first_error(results)
+        if status in {SkillStatus.FALLBACK, SkillStatus.ERROR}
+        else None
+    )
     return SkillResult[ResultT](
         status=status,
         data=workflow,
@@ -482,7 +496,9 @@ def _combined_child_status(
     *,
     has_user_data: bool,
 ) -> SkillStatus:
-    if any(result.status in {SkillStatus.ERROR, SkillStatus.FALLBACK} for result in results):
+    if any(result.status == SkillStatus.ERROR for result in results):
+        return SkillStatus.ERROR
+    if any(result.status == SkillStatus.FALLBACK for result in results):
         return SkillStatus.FALLBACK
     if not has_user_data:
         return SkillStatus.EMPTY
@@ -524,6 +540,8 @@ def _workflow_message(status: SkillStatus) -> str:
         return "Workflow completed successfully."
     if status == SkillStatus.EMPTY:
         return "Workflow completed without user-facing results."
+    if status == SkillStatus.ERROR:
+        return "Workflow failed; inspect trace for details."
     return "Workflow completed with fallback output; inspect trace for details."
 
 

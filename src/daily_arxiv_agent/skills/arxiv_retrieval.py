@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from email.utils import parsedate_to_datetime
+import os
 import re
 import time
 from typing import Any
+from urllib import error
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 from daily_arxiv_agent.contracts import (
@@ -24,6 +27,8 @@ from daily_arxiv_agent.storage import SQLitePaperStore
 
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
+DEFAULT_ARXIV_USER_AGENT = "daily-arxiv-agent/0.1 (+local-debug)"
+RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 
 class ArxivRetrievalSkill:
@@ -35,11 +40,21 @@ class ArxivRetrievalSkill:
         store: SQLitePaperStore,
         client: Any | None = None,
         request_delay_seconds: float = 3.0,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 5.0,
+        user_agent: str | None = None,
         timeout_seconds: float = 30.0,
     ) -> None:
         self.store = store
-        self.client = client or _UrllibClient()
-        self.request_delay_seconds = request_delay_seconds
+        self.request_delay_seconds = max(request_delay_seconds, 0.0)
+        self.max_retries = max(max_retries, 0)
+        self.retry_backoff_seconds = max(retry_backoff_seconds, 0.0)
+        resolved_user_agent = (
+            user_agent.strip()
+            if user_agent and user_agent.strip()
+            else os.getenv("ARXIV_USER_AGENT", DEFAULT_ARXIV_USER_AGENT)
+        )
+        self.client = client or _UrllibClient(user_agent=resolved_user_agent)
         self.timeout_seconds = timeout_seconds
 
     def retrieve(
@@ -65,15 +80,7 @@ class ArxivRetrievalSkill:
 
         params = build_arxiv_request_params(query)
         try:
-            if self.request_delay_seconds > 0:
-                time.sleep(self.request_delay_seconds)
-            response = self.client.get(
-                ARXIV_API_URL,
-                params=params,
-                timeout=self.timeout_seconds,
-            )
-            if hasattr(response, "raise_for_status"):
-                response.raise_for_status()
+            response = self._fetch_response(params)
         except Exception as exc:
             cached_after_failure = self.store.load_retrieval(query)
             return SkillResult[list[PaperMetadata]](
@@ -101,18 +108,24 @@ class ArxivRetrievalSkill:
         try:
             papers = parse_atom_response(response.text, query)
         except ValueError as exc:
+            cached_after_failure = self.store.load_retrieval(query)
             return SkillResult[list[PaperMetadata]](
                 status=SkillStatus.FALLBACK,
-                data=[],
+                data=cached_after_failure,
                 evidence_source=EvidenceSource.METADATA,
+                provenance=[paper.provenance for paper in cached_after_failure],
                 error=SkillError(
                     code="arxiv_parse_failed",
                     message=str(exc),
                     retryable=False,
                 ),
-                message="arXiv returned a response that could not be parsed.",
+                message=(
+                    "Using cached arXiv results after a parse failure."
+                    if cached_after_failure
+                    else "arXiv returned a response that could not be parsed."
+                ),
                 metadata={
-                    "cache_hit": False,
+                    "cache_hit": bool(cached_after_failure),
                     "query": query.model_dump(mode="json"),
                     "request_params": params,
                 },
@@ -132,6 +145,40 @@ class ArxivRetrievalSkill:
                 "request_params": params,
             },
         )
+
+    def _fetch_response(self, params: dict[str, object]) -> Any:
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            delay_seconds = (
+                self.request_delay_seconds
+                if attempt == 0
+                else self._retry_delay_seconds(last_exc, attempt)
+            )
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+
+            try:
+                response = self.client.get(
+                    ARXIV_API_URL,
+                    params=params,
+                    timeout=self.timeout_seconds,
+                )
+                if hasattr(response, "raise_for_status"):
+                    response.raise_for_status()
+                return response
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= self.max_retries or not _is_retryable_request_exception(exc):
+                    raise
+
+        if last_exc is None:  # pragma: no cover - defensive guard.
+            raise RuntimeError("arXiv request failed without an exception.")
+        raise last_exc
+
+    def _retry_delay_seconds(self, exc: Exception | None, attempt: int) -> float:
+        retry_after = _retry_after_seconds(exc)
+        backoff = self.retry_backoff_seconds * attempt
+        return max(self.request_delay_seconds, retry_after or 0.0, backoff)
 
 
 def build_arxiv_request_params(query: RetrievalQuery) -> dict[str, object]:
@@ -275,7 +322,47 @@ class _TextResponse:
 
 
 class _UrllibClient:
+    def __init__(self, *, user_agent: str) -> None:
+        self.user_agent = user_agent
+
     def get(self, url: str, *, params: dict[str, object], timeout: float) -> _TextResponse:
         query_string = urlencode(params)
-        with urlopen(f"{url}?{query_string}", timeout=timeout) as response:
+        req = Request(
+            f"{url}?{query_string}",
+            headers={
+                "User-Agent": self.user_agent,
+                "Accept": "application/atom+xml",
+            },
+        )
+        with urlopen(req, timeout=timeout) as response:
             return _TextResponse(response.read().decode("utf-8"))
+
+
+def _is_retryable_request_exception(exc: Exception) -> bool:
+    if isinstance(exc, error.HTTPError):
+        return exc.code in RETRYABLE_STATUS_CODES
+    return isinstance(exc, (error.URLError, TimeoutError))
+
+
+def _retry_after_seconds(exc: Exception | None) -> float | None:
+    if not isinstance(exc, error.HTTPError) or exc.headers is None:
+        return None
+
+    raw_value = exc.headers.get("Retry-After")
+    if not raw_value:
+        return None
+
+    try:
+        return max(float(raw_value), 0.0)
+    except ValueError:
+        pass
+
+    try:
+        retry_at = parsedate_to_datetime(raw_value)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    delta = (retry_at - datetime.now(retry_at.tzinfo)).total_seconds()
+    return max(delta, 0.0)

@@ -47,6 +47,20 @@ class RaisingRetrievalSkill:
         raise RuntimeError("retrieval unavailable")
 
 
+class FallbackRetrievalSkill:
+    def retrieve(self, query, use_cache=True):  # noqa: ANN001, ANN201
+        return SkillResult[list[PaperMetadata]](
+            status=SkillStatus.FALLBACK,
+            data=[],
+            evidence_source=EvidenceSource.METADATA,
+            error=SkillError(
+                code="cached_results_used",
+                message="retrieval used cached results",
+                retryable=True,
+            ),
+        )
+
+
 class SpyRetrievalSkill:
     def __init__(self) -> None:
         self.calls = 0
@@ -212,7 +226,7 @@ def test_followup_workflow_filters_stored_papers_without_fetching(tmp_path) -> N
     assert retrieval.calls == 0
 
 
-def test_skill_failure_is_visible_in_trace_and_returns_workflow_fallback(tmp_path) -> None:
+def test_skill_failure_is_visible_in_trace_and_returns_workflow_error(tmp_path) -> None:
     store = SQLitePaperStore(tmp_path / "papers.sqlite3")
     orchestrator = DailyArxivAgentOrchestrator(
         store=store,
@@ -225,7 +239,7 @@ def test_skill_failure_is_visible_in_trace_and_returns_workflow_fallback(tmp_pat
         run_id="run-failure",
     )
 
-    assert result.status == SkillStatus.FALLBACK
+    assert result.status == SkillStatus.ERROR
     assert result.error is not None
     assert result.error.code == "retrieval_skill_failed"
     workflow = result.data
@@ -237,7 +251,32 @@ def test_skill_failure_is_visible_in_trace_and_returns_workflow_fallback(tmp_pat
     assert first_step.error_code == "retrieval_skill_failed"
 
 
-def test_cli_demo_runs_fixture_backed_workflow_end_to_end(tmp_path, capsys) -> None:
+def test_skill_fallback_is_visible_in_trace_and_returns_workflow_fallback(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=store,
+        retrieval_skill=FallbackRetrievalSkill(),
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(topic="agents", category="cs.LG", max_results=5),
+        run_id="run-fallback",
+    )
+
+    assert result.status == SkillStatus.FALLBACK
+    assert result.error is not None
+    assert result.error.code == "cached_results_used"
+    workflow = result.data
+    assert workflow is not None
+    assert workflow.trace[0].status == SkillStatus.FALLBACK
+
+
+def test_cli_demo_runs_fixture_backed_workflow_end_to_end(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+
     exit_code = main(
         [
             "demo",
@@ -268,6 +307,19 @@ def test_cli_demo_runs_fixture_backed_workflow_end_to_end(tmp_path, capsys) -> N
         "briefing",
     ]
     assert len(payload["data"]["recommendations"]) == 2
+
+
+def test_default_orchestrator_uses_arxiv_delay_from_env(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ARXIV_REQUEST_DELAY_SECONDS", "0")
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3")
+    )
+
+    assert orchestrator.retrieval_skill.request_delay_seconds == 0
 
 
 def test_cli_returns_nonzero_exit_code_for_fallback(monkeypatch, capsys) -> None:

@@ -1,5 +1,7 @@
 from datetime import date
+from io import BytesIO
 from pathlib import Path
+from urllib import error
 
 import pytest
 
@@ -34,8 +36,31 @@ class FakeClient:
 
 
 class FailingClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def get(self, url: str, params: dict[str, object], timeout: float) -> FakeResponse:
+        self.calls += 1
         raise TimeoutError("network unavailable")
+
+
+class RateLimitedClient:
+    def __init__(self, text: str, *, failures_before_success: int) -> None:
+        self.text = text
+        self.failures_before_success = failures_before_success
+        self.calls = 0
+
+    def get(self, url: str, params: dict[str, object], timeout: float) -> FakeResponse:
+        self.calls += 1
+        if self.calls <= self.failures_before_success:
+            raise error.HTTPError(
+                url=url,
+                code=429,
+                msg="Too Many Requests",
+                hdrs={"Retry-After": "0"},
+                fp=BytesIO(b"rate limited"),
+            )
+        return FakeResponse(self.text)
 
 
 def test_parse_atom_fixture_returns_normalized_papers() -> None:
@@ -110,10 +135,12 @@ def test_empty_arxiv_response_returns_successful_empty_result(tmp_path) -> None:
 
 def test_network_failure_returns_fallback_with_failed_query_metadata(tmp_path) -> None:
     query = RetrievalQuery(topic="agents", category="cs.LG")
+    client = FailingClient()
     skill = ArxivRetrievalSkill(
         store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
-        client=FailingClient(),
+        client=client,
         request_delay_seconds=0,
+        retry_backoff_seconds=0,
     )
 
     result = skill.retrieve(query)
@@ -124,6 +151,24 @@ def test_network_failure_returns_fallback_with_failed_query_metadata(tmp_path) -
     assert result.error.code == "arxiv_request_failed"
     assert result.error.retryable is True
     assert result.metadata["query"]["topic"] == "agents"
+    assert client.calls == 3
+
+
+def test_rate_limited_request_retries_then_succeeds(tmp_path) -> None:
+    query = RetrievalQuery(topic="agents", category="cs.LG")
+    client = RateLimitedClient(FIXTURE.read_text(), failures_before_success=1)
+    skill = ArxivRetrievalSkill(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        client=client,
+        request_delay_seconds=0,
+        retry_backoff_seconds=0,
+    )
+
+    result = skill.retrieve(query, use_cache=False)
+
+    assert result.status == SkillStatus.SUCCESS
+    assert len(result.data or []) == 2
+    assert client.calls == 2
 
 
 def test_malformed_atom_response_returns_fallback_without_corrupting_storage(tmp_path) -> None:
@@ -141,6 +186,36 @@ def test_malformed_atom_response_returns_fallback_without_corrupting_storage(tmp
     assert result.error is not None
     assert result.error.code == "arxiv_parse_failed"
     assert store.list_papers() == []
+
+
+def test_malformed_atom_response_reuses_cached_results_when_available(tmp_path) -> None:
+    query = RetrievalQuery(topic="agents", category="cs.LG")
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    priming_skill = ArxivRetrievalSkill(
+        store=store,
+        client=FakeClient(FIXTURE.read_text()),
+        request_delay_seconds=0,
+    )
+    priming_result = priming_skill.retrieve(query)
+
+    assert priming_result.status == SkillStatus.SUCCESS
+
+    failing_skill = ArxivRetrievalSkill(
+        store=store,
+        client=FakeClient("<feed><entry>"),
+        request_delay_seconds=0,
+    )
+    result = failing_skill.retrieve(query, use_cache=False)
+
+    assert result.status == SkillStatus.FALLBACK
+    assert result.error is not None
+    assert result.error.code == "arxiv_parse_failed"
+    assert result.metadata["cache_hit"] is True
+    assert [paper.paper_id for paper in result.data or []] == ["2604.00001", "2604.00002"]
+    assert [paper.paper_id for paper in store.load_retrieval(query)] == [
+        "2604.00001",
+        "2604.00002",
+    ]
 
 
 def test_parse_atom_rejects_malformed_xml() -> None:

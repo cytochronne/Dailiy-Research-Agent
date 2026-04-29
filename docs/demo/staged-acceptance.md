@@ -132,3 +132,21 @@ Plan file: `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`
 - Conda environment: `daily-arxiv-agent`
 - Tests: `64 passed` with `conda run -n daily-arxiv-agent python -m pytest`
 - Manual artifact: workflow trace output generated in `docs/demo/unit5-workflow-trace.md`, including recommendation trace, follow-up local reuse, feedback refinement coverage, and fallback visibility.
+
+## Unit 6 Acceptance Checklist
+
+- [x] Method mode returns problem, method overview, core workflow, inputs/outputs, and innovation.
+- [x] Experiment mode returns datasets, baselines, metrics, setup, and conclusions when full-text evidence is available.
+- [x] Limitations mode returns stated limitations, assumptions, missing validation, and risks when source text supports them.
+- [x] Abstract-only fallback clearly labels the evidence source and avoids unsupported experiment claims.
+- [x] PDF parsing failure falls back to abstract-only output when an abstract is available.
+- [x] Missing selected paper returns a structured not-found error through the orchestrator.
+- [x] Selected-paper explanation can run after a recommendation workflow.
+- [x] Manual acceptance artifact exists at `docs/demo/unit6-deep-explanation.md`.
+- [ ] User accepts Unit 6 before commit and push.
+
+## Unit 6 Verification Record
+
+- Conda environment: `daily-arxiv-agent`
+- Tests: `91 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+- Manual artifact: three deterministic explanation outputs generated in `docs/demo/unit6-deep-explanation.md`, covering method, experiment, and limitations modes from full-text evidence plus documented fallback behavior.

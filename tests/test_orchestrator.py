@@ -6,6 +6,7 @@ import daily_arxiv_agent.cli as cli_module
 from daily_arxiv_agent.cli import main
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
+    ExplanationMode,
     PaperMetadata,
     Provenance,
     Recommendation,
@@ -22,6 +23,7 @@ from daily_arxiv_agent.storage import SQLitePaperStore
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "arxiv_atom_response.xml"
+TEXT_FIXTURE = Path(__file__).parent / "fixtures" / "sample_paper_text.txt"
 
 
 class FakeResponse:
@@ -270,6 +272,68 @@ def test_skill_fallback_is_visible_in_trace_and_returns_workflow_fallback(tmp_pa
     workflow = result.data
     assert workflow is not None
     assert workflow.trace[0].status == SkillStatus.FALLBACK
+
+
+def test_paper_explanation_workflow_runs_after_recommendation_workflow(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    client = FakeClient(FIXTURE.read_text())
+    retrieval = ArxivRetrievalSkill(
+        store=store,
+        client=client,
+        request_delay_seconds=0,
+    )
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=store,
+        retrieval_skill=retrieval,
+        provider=FakeLLMProvider(),
+    )
+    recommendation_result = orchestrator.run_recommendation(
+        RetrievalQuery(topic="agents", category="cs.LG", max_results=5),
+        top_k=1,
+        use_cache=False,
+        run_id="run-6-recommend",
+    )
+
+    recommendation_workflow = recommendation_result.data
+    assert recommendation_workflow is not None
+    selected = recommendation_workflow.recommendations[0]
+
+    explanation_result = orchestrator.run_paper_explanation(
+        selected.paper.paper_id,
+        mode=ExplanationMode.METHOD,
+        recommendations=recommendation_workflow.recommendations,
+        full_text=TEXT_FIXTURE.read_text(),
+        run_id="run-6-explain",
+    )
+
+    assert explanation_result.status == SkillStatus.SUCCESS
+    workflow = explanation_result.data
+    assert workflow is not None
+    assert workflow.run_id == "run-6-explain"
+    assert workflow.trace[0].skill == "deep_explanation"
+    assert workflow.explanation is not None
+    assert workflow.explanation.method is not None
+    assert workflow.explanation.evidence_source == EvidenceSource.FULL_TEXT
+
+
+def test_missing_selected_paper_returns_structured_not_found_error(tmp_path) -> None:
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_paper_explanation(
+        "missing-paper",
+        mode=ExplanationMode.LIMITATIONS,
+    )
+
+    assert result.status == SkillStatus.ERROR
+    assert result.error is not None
+    assert result.error.code == "paper_not_found"
+    workflow = result.data
+    assert workflow is not None
+    assert workflow.trace[0].skill == "deep_explanation"
+    assert workflow.trace[0].status == SkillStatus.ERROR
 
 
 def test_cli_demo_runs_fixture_backed_workflow_end_to_end(

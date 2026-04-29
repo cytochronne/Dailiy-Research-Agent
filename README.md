@@ -6,7 +6,7 @@ Local Agent + Skills project for daily arXiv paper monitoring, recommendation, f
 
 This repository is being built in staged units from `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`.
 
-Current stage: Unit 5, agent orchestrator and follow-up query MVP.
+Current stage: Unit 6, selected-paper deep explanation MVP.
 
 ## Setup
 
@@ -276,6 +276,40 @@ followup = agent.run_followup_query(
 ```
 
 Follow-up queries search the local SQLite paper store first. Retrieval is only attempted when no stored paper matches and `fetch_if_empty=True`.
+
+## Paper-Level Deep Explanation
+
+Unit 6 adds selected-paper explanation modes with cached full-text reuse, PDF-to-text preparation for one paper at a time, and abstract/metadata fallback:
+
+- `daily_arxiv_agent.skills.deep_explanation.PaperDeepExplanationSkill`
+- `daily_arxiv_agent.contracts.ExplanationMode`
+- `daily_arxiv_agent.contracts.PaperDeepExplanation`
+- `SQLitePaperStore.save_paper_full_text(...)`
+- `SQLitePaperStore.load_paper_full_text(...)`
+- `DailyArxivAgentOrchestrator.run_paper_explanation(...)`
+
+The explanation workflow supports `method`, `experiment`, and `limitations` modes. When full text is unavailable, the Skill returns a clearly labeled fallback result that explains whether it relied on abstract text or metadata only.
+
+Example selected-paper explanation:
+
+```python
+from daily_arxiv_agent.contracts import ExplanationMode
+
+paper_id = workflow.recommendations[0].paper.paper_id
+explanation_result = agent.run_paper_explanation(
+    paper_id,
+    mode=ExplanationMode.METHOD,
+    recommendations=workflow.recommendations,
+    full_text="Full paper text for the selected paper...",
+)
+
+explanation_workflow = explanation_result.data
+explanation = (
+    explanation_workflow.explanation
+    if explanation_workflow is not None
+    else None
+)
+```
 
 Fixture-backed CLI demo:
 

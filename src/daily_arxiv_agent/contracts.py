@@ -37,6 +37,14 @@ class FeedbackValue(StrEnum):
     DISLIKE = "dislike"
 
 
+class ExplanationMode(StrEnum):
+    """Supported selected-paper explanation modes."""
+
+    METHOD = "method"
+    EXPERIMENT = "experiment"
+    LIMITATIONS = "limitations"
+
+
 class Provenance(BaseModel):
     """Where a paper or generated output came from."""
 
@@ -223,6 +231,71 @@ class DailyBriefing(BaseModel):
     items: list[PaperBriefingItem] = Field(default_factory=list)
     evidence_source: EvidenceSource | None = None
     provenance: list[Provenance] = Field(default_factory=list)
+
+
+class MethodExplanation(BaseModel):
+    """Method or framework explanation fields."""
+
+    problem: str
+    method_overview: str
+    core_workflow: list[str] = Field(default_factory=list)
+    inputs_outputs: list[str] = Field(default_factory=list)
+    innovation: str
+
+
+class ExperimentExplanation(BaseModel):
+    """Experiment and results explanation fields."""
+
+    datasets: list[str] = Field(default_factory=list)
+    baselines: list[str] = Field(default_factory=list)
+    metrics: list[str] = Field(default_factory=list)
+    experimental_setup: str
+    conclusions: list[str] = Field(default_factory=list)
+
+
+class LimitationsExplanation(BaseModel):
+    """Limitations explanation fields."""
+
+    stated_limitations: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    missing_validation: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
+class PaperDeepExplanation(BaseModel):
+    """Mode-specific explanation for one selected paper."""
+
+    paper_id: str
+    title: str
+    mode: ExplanationMode
+    summary: str
+    evidence_source: EvidenceSource
+    evidence_note: str
+    method: MethodExplanation | None = None
+    experiment: ExperimentExplanation | None = None
+    limitations: LimitationsExplanation | None = None
+    provenance: Provenance
+    arxiv_url: HttpUrl
+
+    @model_validator(mode="after")
+    def validate_mode_shape(self) -> "PaperDeepExplanation":
+        expected = {
+            ExplanationMode.METHOD: "method",
+            ExplanationMode.EXPERIMENT: "experiment",
+            ExplanationMode.LIMITATIONS: "limitations",
+        }
+        active_name = expected[self.mode]
+        active_value = getattr(self, active_name)
+        if active_value is None:
+            raise ValueError(f"{active_name} explanation is required for mode {self.mode!r}")
+        for field_name in expected.values():
+            if field_name == active_name:
+                continue
+            if getattr(self, field_name) is not None:
+                raise ValueError(
+                    f"{field_name} must be omitted for mode {self.mode!r}"
+                )
+        return self
 
 
 class SkillResult(BaseModel, Generic[DataT]):

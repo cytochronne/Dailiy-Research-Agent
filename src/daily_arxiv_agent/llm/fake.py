@@ -7,7 +7,12 @@ from typing import Sequence
 
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
+    ExperimentExplanation,
+    ExplanationMode,
+    LimitationsExplanation,
+    MethodExplanation,
     PaperBriefingItem,
+    PaperDeepExplanation,
     PaperMetadata,
     Recommendation,
 )
@@ -78,6 +83,129 @@ class FakeLLMProvider:
             f"{leader.evidence_source.value}."
         )
 
+    def explain_paper(
+        self,
+        paper: PaperMetadata,
+        *,
+        mode: ExplanationMode,
+        content: str,
+        evidence_source: EvidenceSource,
+    ) -> PaperDeepExplanation:
+        sections = _parse_labeled_sections(content)
+        summary = sections.get("summary") or _first_sentence(content) or (
+            f"Explanation prepared from the available {_source_label(evidence_source)} source."
+        )
+        evidence_note = (
+            f"This explanation is based on the available {_source_label(evidence_source)} source."
+        )
+
+        if mode == ExplanationMode.METHOD:
+            return PaperDeepExplanation(
+                paper_id=paper.paper_id,
+                title=paper.title,
+                mode=mode,
+                summary=summary,
+                evidence_source=evidence_source,
+                evidence_note=evidence_note,
+                method=MethodExplanation(
+                    problem=(
+                        sections.get("problem")
+                        or _sentence_with_keywords(content, "problem", "address", "task")
+                        or _missing_evidence("problem statement", evidence_source)
+                    ),
+                    method_overview=(
+                        sections.get("method_overview")
+                        or _sentence_with_keywords(
+                            content,
+                            "method",
+                            "approach",
+                            "framework",
+                            "pipeline",
+                            "propose",
+                        )
+                        or _missing_evidence("method overview", evidence_source)
+                    ),
+                    core_workflow=(
+                        _split_items(sections.get("core_workflow"))
+                        or _collect_sentences(
+                            content,
+                            "workflow",
+                            "pipeline",
+                            "step",
+                            "module",
+                        )
+                        or [_missing_evidence("core workflow", evidence_source)]
+                    ),
+                    inputs_outputs=(
+                        _split_items(sections.get("inputs_outputs"))
+                        or _collect_sentences(content, "input", "output")
+                        or [_missing_evidence("inputs and outputs", evidence_source)]
+                    ),
+                    innovation=(
+                        sections.get("innovation")
+                        or _sentence_with_keywords(
+                            content,
+                            "innovation",
+                            "novel",
+                            "contribution",
+                            "improve",
+                        )
+                        or _missing_evidence("claimed innovation", evidence_source)
+                    ),
+                ),
+                provenance=paper.provenance,
+                arxiv_url=paper.arxiv_url,
+            )
+
+        if mode == ExplanationMode.EXPERIMENT:
+            return PaperDeepExplanation(
+                paper_id=paper.paper_id,
+                title=paper.title,
+                mode=mode,
+                summary=summary,
+                evidence_source=evidence_source,
+                evidence_note=evidence_note,
+                experiment=ExperimentExplanation(
+                    datasets=_split_items(sections.get("datasets"))
+                    or [_missing_evidence("datasets", evidence_source)],
+                    baselines=_split_items(sections.get("baselines"))
+                    or [_missing_evidence("baselines", evidence_source)],
+                    metrics=_split_items(sections.get("metrics"))
+                    or [_missing_evidence("metrics", evidence_source)],
+                    experimental_setup=(
+                        sections.get("experimental_setup")
+                        or _sentence_with_keywords(content, "setup", "experiment", "evaluate")
+                        or _missing_evidence("experimental setup", evidence_source)
+                    ),
+                    conclusions=_split_items(sections.get("conclusions"))
+                    or _collect_sentences(content, "result", "conclusion", "improve")
+                    or [_missing_evidence("main conclusions", evidence_source)],
+                ),
+                provenance=paper.provenance,
+                arxiv_url=paper.arxiv_url,
+            )
+
+        return PaperDeepExplanation(
+            paper_id=paper.paper_id,
+            title=paper.title,
+            mode=mode,
+            summary=summary,
+            evidence_source=evidence_source,
+            evidence_note=evidence_note,
+            limitations=LimitationsExplanation(
+                stated_limitations=_split_items(sections.get("stated_limitations"))
+                or [_missing_evidence("stated limitations", evidence_source)],
+                assumptions=_split_items(sections.get("assumptions"))
+                or [_missing_evidence("assumptions", evidence_source)],
+                missing_validation=_split_items(sections.get("missing_validation"))
+                or [_missing_evidence("missing validation", evidence_source)],
+                risks=_split_items(sections.get("risks"))
+                or [_missing_evidence("possible risks", evidence_source)],
+            ),
+            provenance=paper.provenance,
+            arxiv_url=paper.arxiv_url,
+        )
+
 
 def _first_sentence(text: str) -> str:
     stripped = " ".join(text.split())
@@ -107,3 +235,80 @@ def _methods_from_text(text: str) -> list[str]:
         return ["Method details are only available at abstract level."]
     return [f"Abstract mentions {term}." for term in matched[:3]]
 
+
+def _parse_labeled_sections(text: str) -> dict[str, str]:
+    aliases = {
+        "summary": "summary",
+        "problem": "problem",
+        "method overview": "method_overview",
+        "core workflow": "core_workflow",
+        "inputs and outputs": "inputs_outputs",
+        "innovation": "innovation",
+        "datasets": "datasets",
+        "baselines": "baselines",
+        "metrics": "metrics",
+        "experimental setup": "experimental_setup",
+        "conclusions": "conclusions",
+        "stated limitations": "stated_limitations",
+        "assumptions": "assumptions",
+        "missing validation": "missing_validation",
+        "risks": "risks",
+    }
+    sections: dict[str, str] = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        label, value = line.split(":", 1)
+        key = aliases.get(label.strip().lower())
+        cleaned = " ".join(value.split())
+        if key and cleaned:
+            sections[key] = cleaned
+    return sections
+
+
+def _split_items(value: str | None) -> list[str]:
+    if not value:
+        return []
+    parts = re.split(r"\s*[;|]\s*|\s*\.\s+(?=[A-Z0-9])", value)
+    items = [" ".join(part.split()) for part in parts if part.strip()]
+    return items
+
+
+def _sentence_with_keywords(text: str, *keywords: str) -> str:
+    sentences = _split_sentences(text)
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if any(keyword in lowered for keyword in keywords):
+            return sentence
+    return ""
+
+
+def _collect_sentences(text: str, *keywords: str) -> list[str]:
+    sentences = _split_sentences(text)
+    matches = [
+        sentence
+        for sentence in sentences
+        if any(keyword in sentence.lower() for keyword in keywords)
+    ]
+    return matches[:3]
+
+
+def _split_sentences(text: str) -> list[str]:
+    stripped = " ".join(text.split())
+    if not stripped:
+        return []
+    return [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", stripped)
+        if sentence.strip()
+    ]
+
+
+def _source_label(evidence_source: EvidenceSource) -> str:
+    if evidence_source == EvidenceSource.FULL_TEXT:
+        return "full-text"
+    return evidence_source.value
+
+
+def _missing_evidence(subject: str, evidence_source: EvidenceSource) -> str:
+    return f"{subject.capitalize()} was not found in the available {_source_label(evidence_source)} source."

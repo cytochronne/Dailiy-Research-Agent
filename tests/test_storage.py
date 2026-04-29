@@ -133,3 +133,37 @@ def test_sqlite_store_returns_latest_feedback_by_paper(tmp_path) -> None:
     )
 
     assert latest[paper.paper_id] == second
+
+
+def test_sqlite_store_caches_full_text_for_selected_papers(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+
+    store.save_paper_full_text(
+        "2604.00001",
+        "  Full paper text for a selected explanation path.  ",
+        source_url="https://arxiv.org/pdf/2604.00001v1",
+    )
+    loaded = store.load_paper_full_text(
+        "2604.00001",
+        source_url="https://arxiv.org/pdf/2604.00001v1",
+    )
+
+    assert loaded == "Full paper text for a selected explanation path."
+
+
+def test_sqlite_store_scopes_full_text_cache_by_source_url(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+
+    store.save_paper_full_text(
+        "2604.00001",
+        "Version one text.",
+        source_url="https://arxiv.org/pdf/2604.00001v1",
+    )
+
+    assert (
+        store.load_paper_full_text(
+            "2604.00001",
+            source_url="https://arxiv.org/pdf/2604.00001v2",
+        )
+        is None
+    )

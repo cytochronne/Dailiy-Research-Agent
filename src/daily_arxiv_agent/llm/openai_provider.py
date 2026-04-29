@@ -12,7 +12,12 @@ from urllib import error, request
 
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
+    ExperimentExplanation,
+    ExplanationMode,
+    LimitationsExplanation,
+    MethodExplanation,
     PaperBriefingItem,
+    PaperDeepExplanation,
     PaperMetadata,
     Recommendation,
 )
@@ -186,6 +191,52 @@ class OpenAILLMProvider:
             output_retries=self.briefing_output_retries,
         )
 
+    def explain_paper(
+        self,
+        paper: PaperMetadata,
+        *,
+        mode: ExplanationMode,
+        content: str,
+        evidence_source: EvidenceSource,
+    ) -> PaperDeepExplanation:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You explain research papers using only the provided source text. "
+                        "Do not invent details. When evidence is missing, explicitly say "
+                        f"'Not found in the available {_source_label(evidence_source)} source.' "
+                        "Return strict JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": _build_explanation_prompt(
+                        paper=paper,
+                        mode=mode,
+                        content=content,
+                        evidence_source=evidence_source,
+                    ),
+                },
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.1,
+        }
+        return self._complete_with_validation(
+            payload,
+            validator=lambda response: _parse_explanation_response(
+                response,
+                paper=paper,
+                mode=mode,
+                evidence_source=evidence_source,
+            ),
+            max_retries=self.max_retries,
+            retry_backoff_seconds=self.retry_backoff_seconds,
+            output_retries=self.output_retries,
+        )
+
     def _chat_completion(
         self,
         payload: dict[str, Any],
@@ -328,6 +379,24 @@ def _build_summary_prompt(*, topic: str, items: Sequence[PaperBriefingItem]) -> 
     return "\n".join(lines)
 
 
+def _build_explanation_prompt(
+    *,
+    paper: PaperMetadata,
+    mode: ExplanationMode,
+    content: str,
+    evidence_source: EvidenceSource,
+) -> str:
+    return (
+        f"Paper ID: {paper.paper_id}\n"
+        f"Title: {paper.title}\n"
+        f"Explanation mode: {mode.value}\n"
+        f"Evidence source: {evidence_source.value}\n"
+        f"Source text:\n{_clip_text(content, limit=20000)}\n\n"
+        f"Return JSON only with this schema:\n{_explanation_schema(mode, evidence_source)}\n"
+        "No markdown. No extra keys."
+    )
+
+
 def _extract_content_text(payload: dict[str, Any]) -> str:
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
@@ -379,6 +448,131 @@ def _parse_summary_response(payload: dict[str, Any]) -> str:
     return summary
 
 
+def _parse_explanation_response(
+    payload: dict[str, Any],
+    *,
+    paper: PaperMetadata,
+    mode: ExplanationMode,
+    evidence_source: EvidenceSource,
+) -> PaperDeepExplanation:
+    parsed = _parse_json_content(payload)
+    summary = _clean_text(parsed.get("summary"))
+    if not summary:
+        raise RuntimeError("LLM explanation returned empty summary.")
+
+    evidence_note = (
+        f"This explanation is based on the available {_source_label(evidence_source)} source."
+    )
+    if mode == ExplanationMode.METHOD:
+        return PaperDeepExplanation(
+            paper_id=paper.paper_id,
+            title=paper.title,
+            mode=mode,
+            summary=summary,
+            evidence_source=evidence_source,
+            evidence_note=evidence_note,
+            method=MethodExplanation(
+                problem=_required_text(
+                    parsed.get("problem"),
+                    subject="problem statement",
+                    evidence_source=evidence_source,
+                ),
+                method_overview=_required_text(
+                    parsed.get("method_overview"),
+                    subject="method overview",
+                    evidence_source=evidence_source,
+                ),
+                core_workflow=_required_list(
+                    parsed.get("core_workflow"),
+                    subject="core workflow",
+                    evidence_source=evidence_source,
+                ),
+                inputs_outputs=_required_list(
+                    parsed.get("inputs_outputs"),
+                    subject="inputs and outputs",
+                    evidence_source=evidence_source,
+                ),
+                innovation=_required_text(
+                    parsed.get("innovation"),
+                    subject="claimed innovation",
+                    evidence_source=evidence_source,
+                ),
+            ),
+            provenance=paper.provenance,
+            arxiv_url=paper.arxiv_url,
+        )
+    if mode == ExplanationMode.EXPERIMENT:
+        return PaperDeepExplanation(
+            paper_id=paper.paper_id,
+            title=paper.title,
+            mode=mode,
+            summary=summary,
+            evidence_source=evidence_source,
+            evidence_note=evidence_note,
+            experiment=ExperimentExplanation(
+                datasets=_required_list(
+                    parsed.get("datasets"),
+                    subject="datasets",
+                    evidence_source=evidence_source,
+                ),
+                baselines=_required_list(
+                    parsed.get("baselines"),
+                    subject="baselines",
+                    evidence_source=evidence_source,
+                ),
+                metrics=_required_list(
+                    parsed.get("metrics"),
+                    subject="metrics",
+                    evidence_source=evidence_source,
+                ),
+                experimental_setup=_required_text(
+                    parsed.get("experimental_setup"),
+                    subject="experimental setup",
+                    evidence_source=evidence_source,
+                ),
+                conclusions=_required_list(
+                    parsed.get("conclusions"),
+                    subject="main conclusions",
+                    evidence_source=evidence_source,
+                ),
+            ),
+            provenance=paper.provenance,
+            arxiv_url=paper.arxiv_url,
+        )
+    return PaperDeepExplanation(
+        paper_id=paper.paper_id,
+        title=paper.title,
+        mode=mode,
+        summary=summary,
+        evidence_source=evidence_source,
+        evidence_note=evidence_note,
+        limitations=LimitationsExplanation(
+            stated_limitations=_required_list(
+                parsed.get("stated_limitations"),
+                subject="stated limitations",
+                evidence_source=evidence_source,
+            ),
+            assumptions=_required_list(
+                parsed.get("assumptions"),
+                subject="assumptions",
+                evidence_source=evidence_source,
+            ),
+            missing_validation=_required_list(
+                parsed.get("missing_validation"),
+                subject="missing validation",
+                evidence_source=evidence_source,
+            ),
+            risks=_required_list(
+                parsed.get("risks"),
+                subject="possible risks",
+                evidence_source=evidence_source,
+            ),
+        ),
+        provenance=paper.provenance,
+        arxiv_url=paper.arxiv_url,
+    )
+
+
 def _normalize_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -422,3 +616,81 @@ def _clean_text(value: Any) -> str:
 
 def _is_retryable_output_exception(exc: Exception) -> bool:
     return isinstance(exc, RuntimeError)
+
+
+def _clip_text(value: str, *, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}\n...[truncated]"
+
+
+def _explanation_schema(
+    mode: ExplanationMode,
+    evidence_source: EvidenceSource,
+) -> str:
+    missing = f"Not found in the available {_source_label(evidence_source)} source."
+    if mode == ExplanationMode.METHOD:
+        return (
+            "{\n"
+            '  "summary": "<=2 sentences>",\n'
+            f'  "problem": "{missing}",\n'
+            f'  "method_overview": "{missing}",\n'
+            f'  "core_workflow": ["{missing}"],\n'
+            f'  "inputs_outputs": ["{missing}"],\n'
+            f'  "innovation": "{missing}"\n'
+            "}"
+        )
+    if mode == ExplanationMode.EXPERIMENT:
+        return (
+            "{\n"
+            '  "summary": "<=2 sentences>",\n'
+            f'  "datasets": ["{missing}"],\n'
+            f'  "baselines": ["{missing}"],\n'
+            f'  "metrics": ["{missing}"],\n'
+            f'  "experimental_setup": "{missing}",\n'
+            f'  "conclusions": ["{missing}"]\n'
+            "}"
+        )
+    return (
+        "{\n"
+        '  "summary": "<=2 sentences>",\n'
+        f'  "stated_limitations": ["{missing}"],\n'
+        f'  "assumptions": ["{missing}"],\n'
+        f'  "missing_validation": ["{missing}"],\n'
+        f'  "risks": ["{missing}"]\n'
+        "}"
+    )
+
+
+def _required_text(
+    value: Any,
+    *,
+    subject: str,
+    evidence_source: EvidenceSource,
+) -> str:
+    cleaned = _clean_text(value)
+    if cleaned:
+        return cleaned
+    return _missing_evidence(subject, evidence_source)
+
+
+def _required_list(
+    value: Any,
+    *,
+    subject: str,
+    evidence_source: EvidenceSource,
+) -> list[str]:
+    normalized = _normalize_list(value)
+    if normalized:
+        return normalized
+    return [_missing_evidence(subject, evidence_source)]
+
+
+def _source_label(evidence_source: EvidenceSource) -> str:
+    if evidence_source == EvidenceSource.FULL_TEXT:
+        return "full-text"
+    return evidence_source.value
+
+
+def _missing_evidence(subject: str, evidence_source: EvidenceSource) -> str:
+    return f"{subject.capitalize()} was not found in the available {_source_label(evidence_source)} source."

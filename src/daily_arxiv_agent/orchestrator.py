@@ -12,8 +12,10 @@ from daily_arxiv_agent.config import AppConfig
 from daily_arxiv_agent.contracts import (
     DailyBriefing,
     EvidenceSource,
+    ExplanationMode,
     FeedbackEvent,
     PaperBriefingItem,
+    PaperDeepExplanation,
     PaperMetadata,
     Provenance,
     Recommendation,
@@ -26,6 +28,7 @@ from daily_arxiv_agent.contracts import (
 from daily_arxiv_agent.llm.base import LLMProvider
 from daily_arxiv_agent.skills.arxiv_retrieval import ArxivRetrievalSkill
 from daily_arxiv_agent.skills.briefing import DailyBriefingSkill
+from daily_arxiv_agent.skills.deep_explanation import PaperDeepExplanationSkill
 from daily_arxiv_agent.skills.extraction import PaperExtractionSkill
 from daily_arxiv_agent.skills.feedback import FeedbackInput, FeedbackRefinementSkill
 from daily_arxiv_agent.skills.followup import FollowupQuery, FollowupSkill
@@ -82,6 +85,17 @@ class FollowupWorkflow(BaseModel):
     trace: list[WorkflowTraceStep] = Field(default_factory=list)
 
 
+class PaperExplanationWorkflow(BaseModel):
+    """Selected-paper explanation workflow output."""
+
+    run_id: str
+    paper_id: str
+    mode: ExplanationMode
+    paper: PaperMetadata | None = None
+    explanation: PaperDeepExplanation | None = None
+    trace: list[WorkflowTraceStep] = Field(default_factory=list)
+
+
 class DailyArxivAgentOrchestrator:
     """Coordinate retrieval, ranking, extraction, briefing, feedback, and follow-up."""
 
@@ -95,6 +109,7 @@ class DailyArxivAgentOrchestrator:
         briefing_skill: DailyBriefingSkill | None = None,
         feedback_skill: FeedbackRefinementSkill | None = None,
         followup_skill: FollowupSkill | None = None,
+        deep_explanation_skill: PaperDeepExplanationSkill | None = None,
         provider: LLMProvider | None = None,
     ) -> None:
         config = AppConfig.from_env()
@@ -110,6 +125,10 @@ class DailyArxivAgentOrchestrator:
         self.followup_skill = followup_skill or FollowupSkill(
             store=self.store,
             retrieval_skill=self.retrieval_skill,
+        )
+        self.deep_explanation_skill = deep_explanation_skill or PaperDeepExplanationSkill(
+            provider=provider,
+            store=self.store,
         )
 
     def run_recommendation(
@@ -366,6 +385,99 @@ class DailyArxivAgentOrchestrator:
 
         return self.run_followup_query(query, **kwargs)
 
+    def run_paper_explanation(
+        self,
+        paper_id: str,
+        *,
+        mode: ExplanationMode,
+        recommendations: Sequence[Recommendation] = (),
+        full_text: str | None = None,
+        run_id: str | None = None,
+    ) -> SkillResult[PaperExplanationWorkflow]:
+        """Explain a selected paper in one of the supported deep-explanation modes."""
+
+        workflow_run_id = run_id or uuid4().hex
+        trace: list[WorkflowTraceStep] = []
+        selected_paper, selection_source = _resolve_selected_paper(
+            paper_id,
+            recommendations=recommendations,
+            store=self.store,
+        )
+        if selected_paper is None:
+            result = SkillResult[PaperDeepExplanation](
+                status=SkillStatus.ERROR,
+                data=None,
+                evidence_source=EvidenceSource.METADATA,
+                error=SkillError(
+                    code="paper_not_found",
+                    message=f"Selected paper {paper_id!r} was not found in recommendations or local storage.",
+                    retryable=False,
+                ),
+                metadata={"paper_id": paper_id, "mode": mode.value},
+            )
+            _append_trace(
+                trace,
+                skill="deep_explanation",
+                input_summary=f"paper_id={paper_id!r}; mode={mode.value!r}",
+                result=result,
+                output_summary="selected paper not found",
+            )
+            workflow = PaperExplanationWorkflow(
+                run_id=workflow_run_id,
+                paper_id=paper_id,
+                mode=mode,
+                trace=trace,
+            )
+            return _workflow_result(
+                workflow,
+                results=[result],
+                has_user_data=False,
+                evidence_source=result.evidence_source,
+            )
+
+        explanation_result = _safe_skill_call(
+            lambda: self.deep_explanation_skill.explain(
+                selected_paper,
+                mode=mode,
+                full_text=full_text,
+            ),
+            data_default=None,
+            error_code="deep_explanation_skill_failed",
+        )
+        _append_trace(
+            trace,
+            skill="deep_explanation",
+            input_summary=(
+                f"paper_id={paper_id!r}; mode={mode.value!r}; "
+                f"selection_source={selection_source!r}"
+            ),
+            result=explanation_result,
+            output_summary=(
+                "deep explanation generated"
+                if explanation_result.data is not None
+                else "no deep explanation generated"
+            ),
+        )
+        workflow = PaperExplanationWorkflow(
+            run_id=workflow_run_id,
+            paper_id=paper_id,
+            mode=mode,
+            paper=selected_paper,
+            explanation=explanation_result.data,
+            trace=trace,
+        )
+        return _workflow_result(
+            workflow,
+            results=[explanation_result],
+            has_user_data=explanation_result.data is not None,
+            evidence_source=explanation_result.evidence_source,
+        )
+
+    def explain_paper(self, paper_id: str, **kwargs: Any) -> SkillResult[PaperExplanationWorkflow]:
+        """Alias for run_paper_explanation."""
+
+        return self.run_paper_explanation(paper_id, **kwargs)
+
     def _extract_recommendations(
         self,
         recommendations: Sequence[Recommendation],
@@ -559,3 +671,18 @@ def _followup_summary(query: FollowupQuery) -> str:
         f"start_date={query.start_date}; end_date={query.end_date}; "
         f"max_results={query.max_results}; fetch_if_empty={query.fetch_if_empty}"
     )
+
+
+def _resolve_selected_paper(
+    paper_id: str,
+    *,
+    recommendations: Sequence[Recommendation],
+    store: SQLitePaperStore,
+) -> tuple[PaperMetadata | None, str]:
+    for recommendation in recommendations:
+        if recommendation.paper.paper_id == paper_id:
+            return recommendation.paper, "recommendations"
+    stored_paper = store.get_paper(paper_id)
+    if stored_paper is not None:
+        return stored_paper, "store"
+    return None, "missing"

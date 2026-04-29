@@ -9,7 +9,7 @@ import re
 import time
 from typing import Any
 from urllib import error
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
@@ -231,6 +231,7 @@ def parse_atom_response(xml_text: str, query: RetrievalQuery) -> list[PaperMetad
             if category.attrib.get("term")
         )
         arxiv_url = f"https://arxiv.org/abs/{paper_id}"
+        source_url = _entry_source_url(entry, paper_id)
         pdf_url = _pdf_url(entry, paper_id)
         search_query = build_arxiv_search_query(query)
         papers.append(
@@ -246,7 +247,7 @@ def parse_atom_response(xml_text: str, query: RetrievalQuery) -> list[PaperMetad
                 pdf_url=pdf_url,
                 provenance=Provenance(
                     source="arxiv",
-                    source_url=arxiv_url,
+                    source_url=source_url,
                     query=search_query,
                 ),
             )
@@ -290,8 +291,37 @@ def _pdf_url(entry: ET.Element, paper_id: str) -> str:
         media_type = link.attrib.get("type", "")
         href = link.attrib.get("href")
         if href and (title == "pdf" or media_type == "application/pdf"):
-            return f"https://arxiv.org/pdf/{paper_id}"
+            return _normalize_arxiv_url(href)
     return f"https://arxiv.org/pdf/{paper_id}"
+
+
+def _entry_source_url(entry: ET.Element, paper_id: str) -> str:
+    for link in entry.findall(f"{ATOM_NS}link"):
+        rel = link.attrib.get("rel", "")
+        media_type = link.attrib.get("type", "")
+        href = link.attrib.get("href")
+        if href and rel == "alternate" and media_type == "text/html":
+            return _normalize_arxiv_url(href)
+
+    entry_id = _optional_text(entry, "id")
+    if entry_id:
+        return _normalize_arxiv_url(entry_id)
+    return f"https://arxiv.org/abs/{paper_id}"
+
+
+def _normalize_arxiv_url(value: str) -> str:
+    parts = urlsplit(value.strip())
+    if not parts.netloc:
+        return value.strip()
+    return urlunsplit(
+        (
+            "https",
+            parts.netloc,
+            parts.path.rstrip("/"),
+            "",
+            "",
+        )
+    )
 
 
 def _parse_atom_date(value: str) -> date | None:

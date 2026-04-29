@@ -1,0 +1,15 @@
+Summary: The paper studies an agent pipeline for daily arXiv recommendation and explanation.
+Problem: The work addresses how to explain ranked research-paper recommendations for faster literature review.
+Method overview: The paper proposes a multi-stage agent framework that retrieves papers, extracts structured evidence, and synthesizes selected-paper explanations.
+Core workflow: Retrieve candidate papers from arXiv; rank them with topic and feedback signals; generate targeted explanations from selected paper text.
+Inputs and outputs: Inputs include a topic query, retrieved metadata, and selected paper text; outputs include ranked recommendations and mode-specific explanations.
+Innovation: The claimed innovation is a transparent explanation loop that keeps evidence labels attached to every generated claim.
+Datasets: ArxivDailyBench; ResearchAgentEval.
+Baselines: BM25 ranking; TF-IDF ranker; Dense retriever.
+Metrics: Recall@5; MRR; preference win rate.
+Experimental setup: The authors evaluate the system on recent cs.LG papers and compare explanation quality with ablated variants.
+Conclusions: Full-text evidence improves explanation completeness; abstract-only fallback remains useful when PDF parsing fails.
+Stated limitations: The evaluation uses a small benchmark and only English arXiv papers.
+Assumptions: The method assumes abstracts and PDFs are aligned with the final paper content.
+Missing validation: The paper does not report latency under larger daily retrieval volumes.
+Risks: Over-trusting generated explanations could hide missing experimental details from users.

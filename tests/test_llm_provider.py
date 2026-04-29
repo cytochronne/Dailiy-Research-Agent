@@ -7,6 +7,7 @@ import pytest
 from daily_arxiv_agent.config import AppConfig
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
+    ExplanationMode,
     PaperBriefingItem,
     PaperMetadata,
     Provenance,
@@ -257,3 +258,58 @@ def test_briefing_uses_dedicated_retry_budget(
 
     assert summary == "Recovered summary."
     assert calls["count"] == 2
+
+
+def test_explain_paper_returns_mode_specific_structure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(req, timeout):  # noqa: ANN001, ANN202
+        return _FakeHTTPResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "summary": "A method-focused explanation.",
+                                    "problem": "The paper addresses explainable recommendation.",
+                                    "method_overview": "It uses a staged agent workflow.",
+                                    "core_workflow": [
+                                        "Retrieve papers",
+                                        "Rank them",
+                                        "Explain one paper",
+                                    ],
+                                    "inputs_outputs": [
+                                        "Input: topic query",
+                                        "Output: paper explanation",
+                                    ],
+                                    "innovation": "It preserves evidence labels.",
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(openai_provider_module.request, "urlopen", fake_urlopen)
+
+    provider = OpenAILLMProvider(
+        api_key="sk-test",
+        model="gpt-5-mini",
+        max_retries=0,
+        output_retries=0,
+        retry_backoff_seconds=0,
+    )
+
+    explanation = provider.explain_paper(
+        _make_paper(),
+        mode=ExplanationMode.METHOD,
+        content="Method overview: a staged workflow.",
+        evidence_source=EvidenceSource.FULL_TEXT,
+    )
+
+    assert explanation.mode == ExplanationMode.METHOD
+    assert explanation.method is not None
+    assert explanation.method.core_workflow[0] == "Retrieve papers"
+    assert explanation.evidence_source == EvidenceSource.FULL_TEXT

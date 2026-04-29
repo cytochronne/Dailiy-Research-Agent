@@ -67,6 +67,12 @@ class SQLitePaperStore:
                     created_at TEXT NOT NULL,
                     event_json TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS paper_full_text_cache (
+                    paper_id TEXT PRIMARY KEY,
+                    full_text TEXT NOT NULL,
+                    cached_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -164,6 +170,20 @@ class SQLitePaperStore:
                 "SELECT payload_json FROM papers ORDER BY paper_id ASC"
             ).fetchall()
         return [self._paper_from_payload(row["payload_json"]) for row in rows]
+
+    def get_paper(self, paper_id: str) -> PaperMetadata | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json
+                FROM papers
+                WHERE paper_id = ?
+                """,
+                (paper_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._paper_from_payload(row["payload_json"])
 
     def find_papers(
         self,
@@ -306,6 +326,61 @@ class SQLitePaperStore:
             latest[event.paper_id] = event
         return latest
 
+    def save_paper_full_text(
+        self,
+        paper_id: str,
+        full_text: str,
+        *,
+        source_url: str | None = None,
+    ) -> None:
+        lines = [" ".join(line.split()) for line in full_text.splitlines()]
+        normalized = "\n".join(line for line in lines if line)
+        if not normalized:
+            normalized = " ".join(full_text.split())
+        if not normalized:
+            return
+        cache_key = self._paper_full_text_cache_key(paper_id, source_url)
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO paper_full_text_cache (
+                    paper_id,
+                    full_text,
+                    cached_at
+                )
+                VALUES (?, ?, ?)
+                ON CONFLICT(paper_id) DO UPDATE SET
+                    full_text = excluded.full_text,
+                    cached_at = excluded.cached_at
+                """,
+                (
+                    cache_key,
+                    normalized,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def load_paper_full_text(
+        self,
+        paper_id: str,
+        *,
+        source_url: str | None = None,
+    ) -> str | None:
+        cache_key = self._paper_full_text_cache_key(paper_id, source_url)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT full_text
+                FROM paper_full_text_cache
+                WHERE paper_id = ?
+                """,
+                (cache_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["full_text"])
+
     @staticmethod
     def query_key(query: RetrievalQuery) -> str:
         payload = query.model_dump(mode="json")
@@ -317,7 +392,28 @@ class SQLitePaperStore:
         return connection
 
     @staticmethod
-    def _paper_row(paper: PaperMetadata) -> tuple[str, str, str, str | None, str, str | None, str | None, str, str | None, str, str]:
+    def _paper_full_text_cache_key(paper_id: str, source_url: str | None) -> str:
+        normalized_source = " ".join(source_url.split()) if source_url else ""
+        if not normalized_source:
+            return paper_id
+        return f"{paper_id}::{normalized_source}"
+
+    @staticmethod
+    def _paper_row(
+        paper: PaperMetadata,
+    ) -> tuple[
+        str,
+        str,
+        str,
+        str | None,
+        str,
+        str | None,
+        str | None,
+        str,
+        str | None,
+        str,
+        str,
+    ]:
         payload = paper.model_dump(mode="json")
         return (
             paper.paper_id,

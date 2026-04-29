@@ -76,7 +76,8 @@ def test_parse_atom_fixture_returns_normalized_papers() -> None:
     assert papers[0].categories == ["cs.LG", "cs.AI"]
     assert papers[0].published_date == date(2026, 4, 20)
     assert str(papers[0].arxiv_url) == "https://arxiv.org/abs/2604.00001"
-    assert str(papers[0].pdf_url) == "https://arxiv.org/pdf/2604.00001"
+    assert str(papers[0].pdf_url) == "https://arxiv.org/pdf/2604.00001v1"
+    assert str(papers[0].provenance.source_url) == "https://arxiv.org/abs/2604.00001v1"
     assert papers[0].provenance.source == "arxiv"
 
 

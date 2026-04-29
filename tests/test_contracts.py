@@ -6,6 +6,9 @@ from pydantic import ValidationError
 from daily_arxiv_agent.config import AppConfig
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
+    ExplanationMode,
+    MethodExplanation,
+    PaperDeepExplanation,
     PaperMetadata,
     Provenance,
     SkillError,
@@ -109,6 +112,31 @@ def test_blank_paper_identity_is_invalid() -> None:
             arxiv_url="https://arxiv.org/abs/2501.00003",
             provenance=Provenance(source="arxiv"),
         )
+
+
+def test_deep_explanation_contract_supports_mode_specific_sections() -> None:
+    paper = make_paper()
+    explanation = PaperDeepExplanation(
+        paper_id=paper.paper_id,
+        title=paper.title,
+        mode=ExplanationMode.METHOD,
+        summary="A concise method explanation.",
+        evidence_source=EvidenceSource.FULL_TEXT,
+        evidence_note="This explanation is based on the available full-text source.",
+        method=MethodExplanation(
+            problem="The paper addresses explainable paper recommendation.",
+            method_overview="It uses a staged agent workflow.",
+            core_workflow=["Retrieve papers", "Rank them", "Explain one paper"],
+            inputs_outputs=["Input: topic query", "Output: explanation"],
+            innovation="It keeps evidence labels attached to generated claims.",
+        ),
+        provenance=paper.provenance,
+        arxiv_url=paper.arxiv_url,
+    )
+
+    assert explanation.mode == ExplanationMode.METHOD
+    assert explanation.method is not None
+    assert explanation.experiment is None
 
 
 def test_config_reads_environment_with_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Protocol, Sequence
 
-from daily_arxiv_agent.contracts import PaperBriefingItem, PaperMetadata, Recommendation
+from daily_arxiv_agent.contracts import (
+    EvidenceSource,
+    ExplanationMode,
+    PaperBriefingItem,
+    PaperDeepExplanation,
+    PaperMetadata,
+    Recommendation,
+)
 
 
 class LLMProvider(Protocol):
@@ -27,3 +34,12 @@ class LLMProvider(Protocol):
     ) -> str:
         """Return the executive summary for a daily briefing."""
 
+    def explain_paper(
+        self,
+        paper: PaperMetadata,
+        *,
+        mode: ExplanationMode,
+        content: str,
+        evidence_source: EvidenceSource,
+    ) -> PaperDeepExplanation:
+        """Return a mode-specific deep explanation for one selected paper."""

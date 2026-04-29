@@ -40,10 +40,10 @@ This acceptance artifact shows the normalized output shape for arXiv retrieval a
     "published_date": "2026-04-20",
     "updated_date": "2026-04-20",
     "arxiv_url": "https://arxiv.org/abs/2604.00001",
-    "pdf_url": "https://arxiv.org/pdf/2604.00001",
+    "pdf_url": "https://arxiv.org/pdf/2604.00001v1",
     "provenance": {
       "source": "arxiv",
-      "source_url": "https://arxiv.org/abs/2604.00001",
+      "source_url": "https://arxiv.org/abs/2604.00001v1",
       "query": "all:\"agents\" AND cat:cs.LG AND submittedDate:[202604180000 TO 202604212359]"
     }
   },
@@ -56,10 +56,10 @@ This acceptance artifact shows the normalized output shape for arXiv retrieval a
     "published_date": "2026-04-18",
     "updated_date": "2026-04-19",
     "arxiv_url": "https://arxiv.org/abs/2604.00002",
-    "pdf_url": "https://arxiv.org/pdf/2604.00002",
+    "pdf_url": "https://arxiv.org/pdf/2604.00002v2",
     "provenance": {
       "source": "arxiv",
-      "source_url": "https://arxiv.org/abs/2604.00002",
+      "source_url": "https://arxiv.org/abs/2604.00002v2",
       "query": "all:\"agents\" AND cat:cs.LG AND submittedDate:[202604180000 TO 202604212359]"
     }
   }
@@ -71,4 +71,5 @@ This acceptance artifact shows the normalized output shape for arXiv retrieval a
 - The retrieval run is stored under a stable key derived from the normalized query.
 - A second retrieval with the same query returns the cached result set without calling arXiv again.
 - Follow-up filtering can reuse stored metadata by topic, category, and date range.
+- Normalized `paper_id` stays version-free, while `pdf_url` and `provenance.source_url` preserve the exact arXiv versioned source links used.
 - PDF files are not downloaded in Unit 1.

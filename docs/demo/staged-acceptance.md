@@ -170,4 +170,24 @@ Plan file: `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`
 - Conda environment: `daily-arxiv-agent`
 - Tests: `99 passed` with `conda run -n daily-arxiv-agent python -m pytest`
 - Manual artifact: `docs/demo/unit7-demo-ui.md` records the recommended demo setup, expected UI flow, and runtime checks for recommendation, feedback, explanation, and follow-up paths.
+- Commit: `c9f2213 feat(unit7): add Streamlit demo UI`
+
+## Unit 8 Acceptance Checklist
+
+- [x] Recommendation evaluation compares ranked results against expected relevant paper IDs.
+- [x] Feedback evaluation detects before/after rank and score movement after likes/dislikes.
+- [x] Explanation completeness checks report present and missing required sections.
+- [x] Empty recommendation lists return a meaningful zero-data evaluation result.
+- [x] Malformed evaluation fixtures return a structured validation error.
+- [x] Manual acceptance artifact exists at `docs/demo/final-demo-script.md`.
+- [x] Manual acceptance artifact exists at `docs/demo/evaluation-summary.md`.
+- [x] User accepts Unit 8 before commit and push.
+
+## Unit 8 Verification Record
+
+- Conda environment: `daily-arxiv-agent`
+- Targeted tests: `9 passed` with `conda run -n daily-arxiv-agent python -m pytest tests/test_evaluation.py`
+- Full tests: `108 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+- Manual artifact: `docs/demo/final-demo-script.md` gives the final presentation flow.
+- Manual artifact: `docs/demo/evaluation-summary.md` records lightweight metric scope, sample fixture interpretation, validation behavior, and reporting notes.
 - Commit: pending.

@@ -6,7 +6,7 @@ Local Agent + Skills project for daily arXiv paper monitoring, recommendation, f
 
 This repository is being built in staged units from `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`.
 
-Current stage: Unit 7, Streamlit demo UI.
+Current stage: Unit 8, evaluation and final demo package.
 
 ## Setup
 
@@ -373,9 +373,47 @@ conda run -n daily-arxiv-agent streamlit run src/daily_arxiv_agent/ui/streamlit_
 
 Acceptance/demo notes for the UI live in `docs/demo/unit7-demo-ui.md`.
 
-## Planned Demo
+## Evaluation and Final Demo Package
 
-The final local demo will show:
+Unit 8 adds lightweight, deterministic evaluation helpers and final course demo artifacts:
+
+- `daily_arxiv_agent.evaluation.metrics.evaluate_recommendations`
+- `daily_arxiv_agent.evaluation.metrics.evaluate_recommendation_fixture`
+- `daily_arxiv_agent.evaluation.metrics.evaluate_feedback_movement`
+- `daily_arxiv_agent.evaluation.metrics.check_explanation_completeness`
+- `docs/demo/final-demo-script.md`
+- `docs/demo/evaluation-summary.md`
+
+The evaluation helpers return the same `SkillResult` envelope used by the rest of the project, so malformed fixtures produce structured errors instead of breaking the demo path.
+
+Example recommendation overlap check:
+
+```python
+from daily_arxiv_agent.evaluation.metrics import evaluate_recommendation_fixture
+
+result = evaluate_recommendation_fixture(
+    {
+        "recommendations": [
+            {"paper_id": "2604.00001", "rank": 1, "score": 9.0},
+            {"paper_id": "2604.00002", "rank": 2, "score": 0.0},
+        ],
+        "expected_relevant_paper_ids": ["2604.00001"],
+        "k": 1,
+    }
+)
+
+metrics = result.data
+```
+
+Run the Unit 8 tests with:
+
+```bash
+conda run -n daily-arxiv-agent python -m pytest tests/test_evaluation.py
+```
+
+## Final Demo
+
+The final local demo is documented in `docs/demo/final-demo-script.md` and shows:
 
 - Agent workflow trace
 - arXiv retrieval results
@@ -383,6 +421,7 @@ The final local demo will show:
 - daily briefing
 - like/dislike refinement
 - selected-paper deep explanation modes
+- lightweight evaluation outputs for reporting
 
 ## Staged Delivery Rule
 

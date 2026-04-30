@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 
+from .contracts import QueryPlannerMode, SearchMode
+
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -24,6 +26,11 @@ class AppConfig:
     llm_briefing_retry_backoff_seconds: float = 1.5
     llm_briefing_output_retries: int = 2
     arxiv_request_delay_seconds: float = 3.0
+    search_mode: SearchMode = SearchMode.BROAD
+    candidate_pool_size: int = 100
+    arxiv_page_size: int = 50
+    arxiv_max_requests_per_search: int = 4
+    query_planner_mode: QueryPlannerMode = QueryPlannerMode.AUTO
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -69,6 +76,32 @@ class AppConfig:
                 "ARXIV_REQUEST_DELAY_SECONDS",
                 cls.arxiv_request_delay_seconds,
             ),
+            search_mode=_search_mode_from_env(
+                "DAILY_ARXIV_SEARCH_MODE",
+                cls.search_mode,
+            ),
+            candidate_pool_size=_bounded_int_from_env(
+                "DAILY_ARXIV_CANDIDATE_POOL_SIZE",
+                cls.candidate_pool_size,
+                min_value=1,
+                max_value=500,
+            ),
+            arxiv_page_size=_bounded_int_from_env(
+                "ARXIV_PAGE_SIZE",
+                cls.arxiv_page_size,
+                min_value=1,
+                max_value=100,
+            ),
+            arxiv_max_requests_per_search=_bounded_int_from_env(
+                "ARXIV_MAX_REQUESTS_PER_SEARCH",
+                cls.arxiv_max_requests_per_search,
+                min_value=1,
+                max_value=20,
+            ),
+            query_planner_mode=_query_planner_mode_from_env(
+                "QUERY_PLANNER_MODE",
+                cls.query_planner_mode,
+            ),
         )
 
 
@@ -90,5 +123,43 @@ def _int_from_env(name: str, default: int) -> int:
 
     try:
         return int(raw_value)
+    except ValueError:
+        return default
+
+
+def _bounded_int_from_env(
+    name: str,
+    default: int,
+    *,
+    min_value: int,
+    max_value: int,
+) -> int:
+    value = _int_from_env(name, default)
+    if value < min_value or value > max_value:
+        return default
+    return value
+
+
+def _search_mode_from_env(name: str, default: SearchMode) -> SearchMode:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value == "":
+        return default
+
+    try:
+        return SearchMode(raw_value.lower())
+    except ValueError:
+        return default
+
+
+def _query_planner_mode_from_env(
+    name: str,
+    default: QueryPlannerMode,
+) -> QueryPlannerMode:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value == "":
+        return default
+
+    try:
+        return QueryPlannerMode(raw_value.lower())
     except ValueError:
         return default

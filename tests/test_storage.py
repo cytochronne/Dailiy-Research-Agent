@@ -1,11 +1,18 @@
-from datetime import date
+from datetime import date, datetime, timezone
 
 from daily_arxiv_agent.contracts import (
     FeedbackEvent,
     FeedbackValue,
     PaperMetadata,
     Provenance,
+    QueryPlan,
+    QueryPlanVariant,
+    QueryPlannerMode,
+    QueryPlannerProvenance,
+    RetrievalCacheStatus,
     RetrievalQuery,
+    RetrievalSourceMetadata,
+    SearchMode,
 )
 from daily_arxiv_agent.skills.seed_parsing import SeedParsingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
@@ -54,6 +61,159 @@ def test_sqlite_store_tracks_retrieval_result_sets(tmp_path) -> None:
     loaded = store.load_retrieval(query)
 
     assert loaded == [paper]
+
+
+def test_query_key_distinguishes_broad_and_strict_search_modes() -> None:
+    strict_query = RetrievalQuery(topic="agents", search_mode=SearchMode.STRICT)
+    broad_query = RetrievalQuery(topic="agents", search_mode=SearchMode.BROAD)
+
+    assert SQLitePaperStore.query_key(strict_query) != SQLitePaperStore.query_key(
+        broad_query
+    )
+    assert SQLitePaperStore.query_key(strict_query) == SQLitePaperStore.query_key(
+        RetrievalQuery(topic="agents", search_mode=SearchMode.STRICT)
+    )
+
+
+def test_effective_query_key_includes_query_plan_metadata() -> None:
+    query = RetrievalQuery(topic="agents", search_mode=SearchMode.BROAD)
+    first_plan = make_query_plan("broad_terms", 'all:"agents"')
+    second_plan = make_query_plan("title_terms", 'ti:"agents"')
+
+    assert SQLitePaperStore.effective_query_key(
+        query,
+        query_plan=first_plan,
+    ) != SQLitePaperStore.effective_query_key(query, query_plan=second_plan)
+
+
+def test_effective_query_key_ignores_nonsemantic_planner_timestamp() -> None:
+    query = RetrievalQuery(topic="agents", search_mode=SearchMode.BROAD)
+    first_plan = make_query_plan(
+        "broad_terms",
+        'all:"agents"',
+        generated_at=datetime(2026, 4, 30, 1, tzinfo=timezone.utc),
+    )
+    second_plan = make_query_plan(
+        "broad_terms",
+        'all:"agents"',
+        generated_at=datetime(2026, 4, 30, 2, tzinfo=timezone.utc),
+    )
+
+    assert SQLitePaperStore.effective_query_key(
+        query,
+        query_plan=first_plan,
+    ) == SQLitePaperStore.effective_query_key(query, query_plan=second_plan)
+
+
+def test_sqlite_store_saves_effective_retrieval_with_source_metadata(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    query = RetrievalQuery(topic="agents", search_mode=SearchMode.BROAD)
+    plan = make_query_plan("broad_terms", 'all:"agents"')
+    paper = make_paper()
+    source_metadata = RetrievalSourceMetadata(
+        variant_label="broad_terms",
+        sort_by="relevance",
+        variant_index=0,
+        position=2,
+        first_seen_order=0,
+        query='all:"agents"',
+    )
+
+    store.save_retrieval_result_set(
+        query,
+        [paper],
+        query_plan=plan,
+        source_metadata_by_paper_id={paper.paper_id: [source_metadata]},
+    )
+    loaded = store.load_retrieval_result_set(query, query_plan=plan)
+
+    assert loaded is not None
+    assert loaded.cache_status == RetrievalCacheStatus.COMPLETE
+    assert loaded.papers == [paper]
+    assert loaded.source_metadata_by_paper_id[paper.paper_id] == [source_metadata]
+
+
+def test_retrieval_source_metadata_is_scoped_by_effective_plan(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    query = RetrievalQuery(topic="agents", search_mode=SearchMode.BROAD)
+    paper = make_paper()
+    first_plan = make_query_plan("broad_terms", 'all:"agents"')
+    second_plan = make_query_plan("title_terms", 'ti:"agents"')
+
+    store.save_retrieval_result_set(
+        query,
+        [paper],
+        query_plan=first_plan,
+        source_metadata_by_paper_id={
+            paper.paper_id: [
+                RetrievalSourceMetadata(
+                    variant_label="broad_terms",
+                    sort_by="relevance",
+                    variant_index=0,
+                    position=0,
+                    first_seen_order=0,
+                    query='all:"agents"',
+                )
+            ]
+        },
+    )
+    store.save_retrieval_result_set(
+        query,
+        [paper],
+        query_plan=second_plan,
+        source_metadata_by_paper_id={
+            paper.paper_id: [
+                RetrievalSourceMetadata(
+                    variant_label="title_terms",
+                    sort_by="submittedDate",
+                    variant_index=0,
+                    position=4,
+                    first_seen_order=0,
+                    query='ti:"agents"',
+                )
+            ]
+        },
+    )
+
+    first_loaded = store.load_retrieval_result_set(query, query_plan=first_plan)
+    second_loaded = store.load_retrieval_result_set(query, query_plan=second_plan)
+
+    assert first_loaded is not None
+    assert second_loaded is not None
+    assert (
+        first_loaded.source_metadata_by_paper_id[paper.paper_id][0].variant_label
+        == "broad_terms"
+    )
+    assert (
+        second_loaded.source_metadata_by_paper_id[paper.paper_id][0].variant_label
+        == "title_terms"
+    )
+    assert store.get_paper(paper.paper_id) == paper
+
+
+def test_partial_retrieval_cache_entry_is_not_loaded_as_complete(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    query = RetrievalQuery(topic="agents", search_mode=SearchMode.BROAD)
+    plan = make_query_plan("broad_terms", 'all:"agents"')
+    paper = make_paper()
+
+    store.save_retrieval_result_set(
+        query,
+        [paper],
+        query_plan=plan,
+        cache_status=RetrievalCacheStatus.PARTIAL,
+    )
+
+    assert store.load_retrieval_result_set(query, query_plan=plan) is None
+    partial = store.load_retrieval_result_set(
+        query,
+        query_plan=plan,
+        accept_partial=True,
+    )
+
+    assert partial is not None
+    assert partial.cache_status == RetrievalCacheStatus.PARTIAL
+    assert partial.papers == [paper]
 
 
 def test_sqlite_store_filters_papers_for_followup_queries(tmp_path) -> None:
@@ -166,4 +326,27 @@ def test_sqlite_store_scopes_full_text_cache_by_source_url(tmp_path) -> None:
             source_url="https://arxiv.org/pdf/2604.00001v2",
         )
         is None
+    )
+
+
+def make_query_plan(
+    label: str,
+    search_query: str,
+    *,
+    generated_at: datetime | None = None,
+) -> QueryPlan:
+    return QueryPlan(
+        search_mode=SearchMode.BROAD,
+        planner=QueryPlannerProvenance(
+            requested_mode=QueryPlannerMode.DETERMINISTIC,
+            source="deterministic",
+            generated_at=generated_at or datetime.now(timezone.utc),
+        ),
+        variants=[
+            QueryPlanVariant(
+                label=label,
+                search_query=search_query,
+                sort_by="relevance",
+            )
+        ],
     )

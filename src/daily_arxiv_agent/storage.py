@@ -6,9 +6,18 @@ from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
-from .contracts import FeedbackEvent, PaperMetadata, RetrievalQuery, SeedPreference
+from .contracts import (
+    FeedbackEvent,
+    PaperMetadata,
+    QueryPlan,
+    RetrievalCacheStatus,
+    RetrievalQuery,
+    RetrievalResultSet,
+    RetrievalSourceMetadata,
+    SeedPreference,
+)
 
 
 class SQLitePaperStore:
@@ -41,6 +50,9 @@ class SQLitePaperStore:
                 CREATE TABLE IF NOT EXISTS retrieval_runs (
                     query_key TEXT PRIMARY KEY,
                     query_json TEXT NOT NULL,
+                    effective_plan_json TEXT,
+                    cache_status TEXT NOT NULL DEFAULT 'complete',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
                     retrieved_at TEXT NOT NULL
                 );
 
@@ -48,6 +60,7 @@ class SQLitePaperStore:
                     query_key TEXT NOT NULL,
                     paper_id TEXT NOT NULL,
                     position INTEGER NOT NULL,
+                    source_metadata_json TEXT NOT NULL DEFAULT '[]',
                     PRIMARY KEY (query_key, paper_id),
                     FOREIGN KEY (paper_id) REFERENCES papers(paper_id)
                 );
@@ -75,6 +88,46 @@ class SQLitePaperStore:
                 );
                 """
             )
+            self._ensure_retrieval_schema(connection)
+
+    def _ensure_retrieval_schema(self, connection: sqlite3.Connection) -> None:
+        self._ensure_column(
+            connection,
+            "retrieval_runs",
+            "effective_plan_json",
+            "effective_plan_json TEXT",
+        )
+        self._ensure_column(
+            connection,
+            "retrieval_runs",
+            "cache_status",
+            "cache_status TEXT NOT NULL DEFAULT 'complete'",
+        )
+        self._ensure_column(
+            connection,
+            "retrieval_runs",
+            "metadata_json",
+            "metadata_json TEXT NOT NULL DEFAULT '{}'",
+        )
+        self._ensure_column(
+            connection,
+            "retrieval_results",
+            "source_metadata_json",
+            "source_metadata_json TEXT NOT NULL DEFAULT '[]'",
+        )
+
+    @staticmethod
+    def _ensure_column(
+        connection: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        column_definition: str,
+    ) -> None:
+        columns = {
+            row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})")
+        }
+        if column_name not in columns:
+            connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_definition}")
 
     def save_papers(self, papers: Iterable[PaperMetadata]) -> None:
         paper_list = list(papers)
@@ -114,22 +167,49 @@ class SQLitePaperStore:
             )
 
     def save_retrieval(self, query: RetrievalQuery, papers: Iterable[PaperMetadata]) -> None:
+        self.save_retrieval_result_set(query, papers)
+
+    def save_retrieval_result_set(
+        self,
+        query: RetrievalQuery,
+        papers: Iterable[PaperMetadata],
+        *,
+        query_plan: QueryPlan | None = None,
+        source_metadata_by_paper_id: Mapping[str, list[RetrievalSourceMetadata]]
+        | None = None,
+        cache_status: RetrievalCacheStatus = RetrievalCacheStatus.COMPLETE,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
         paper_list = list(papers)
-        query_key = self.query_key(query)
+        query_key = self.effective_query_key(query, query_plan=query_plan)
+        source_metadata = source_metadata_by_paper_id or {}
         self.save_papers(paper_list)
 
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO retrieval_runs (query_key, query_json, retrieved_at)
-                VALUES (?, ?, ?)
+                INSERT INTO retrieval_runs (
+                    query_key,
+                    query_json,
+                    effective_plan_json,
+                    cache_status,
+                    metadata_json,
+                    retrieved_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(query_key) DO UPDATE SET
                     query_json = excluded.query_json,
+                    effective_plan_json = excluded.effective_plan_json,
+                    cache_status = excluded.cache_status,
+                    metadata_json = excluded.metadata_json,
                     retrieved_at = excluded.retrieved_at
                 """,
                 (
                     query_key,
                     query.model_dump_json(),
+                    query_plan.model_dump_json() if query_plan is not None else None,
+                    cache_status.value,
+                    json.dumps(metadata or {}, sort_keys=True),
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -139,21 +219,57 @@ class SQLitePaperStore:
             )
             connection.executemany(
                 """
-                INSERT INTO retrieval_results (query_key, paper_id, position)
-                VALUES (?, ?, ?)
+                INSERT INTO retrieval_results (
+                    query_key,
+                    paper_id,
+                    position,
+                    source_metadata_json
+                )
+                VALUES (?, ?, ?, ?)
                 """,
                 [
-                    (query_key, paper.paper_id, position)
+                    (
+                        query_key,
+                        paper.paper_id,
+                        position,
+                        self._source_metadata_json(
+                            source_metadata.get(paper.paper_id, [])
+                        ),
+                    )
                     for position, paper in enumerate(paper_list)
                 ],
             )
 
     def load_retrieval(self, query: RetrievalQuery) -> list[PaperMetadata]:
-        query_key = self.query_key(query)
+        result_set = self.load_retrieval_result_set(query)
+        return result_set.papers if result_set is not None else []
+
+    def load_retrieval_result_set(
+        self,
+        query: RetrievalQuery,
+        *,
+        query_plan: QueryPlan | None = None,
+        accept_partial: bool = False,
+    ) -> RetrievalResultSet | None:
+        query_key = self.effective_query_key(query, query_plan=query_plan)
         with self._connect() as connection:
+            run = self._load_retrieval_run(connection, query_key)
+            if run is None and query_plan is None:
+                legacy_key = self.legacy_query_key(query)
+                if legacy_key != query_key:
+                    run = self._load_retrieval_run(connection, legacy_key)
+                    if run is not None:
+                        query_key = legacy_key
+            if run is None:
+                return None
+
+            cache_status = self._cache_status_from_value(run["cache_status"])
+            if cache_status == RetrievalCacheStatus.PARTIAL and not accept_partial:
+                return None
+
             rows = connection.execute(
                 """
-                SELECT p.payload_json
+                SELECT p.payload_json, r.source_metadata_json
                 FROM retrieval_results r
                 JOIN papers p ON p.paper_id = r.paper_id
                 WHERE r.query_key = ?
@@ -162,7 +278,19 @@ class SQLitePaperStore:
                 (query_key,),
             ).fetchall()
 
-        return [self._paper_from_payload(row["payload_json"]) for row in rows]
+        papers = [self._paper_from_payload(row["payload_json"]) for row in rows]
+        source_metadata_by_paper_id = {
+            paper.paper_id: self._source_metadata_from_json(row["source_metadata_json"])
+            for paper, row in zip(papers, rows, strict=True)
+        }
+        return RetrievalResultSet(
+            query=RetrievalQuery.model_validate_json(run["query_json"]),
+            papers=papers,
+            cache_status=cache_status,
+            source_metadata_by_paper_id=source_metadata_by_paper_id,
+            retrieved_at=datetime.fromisoformat(run["retrieved_at"]),
+            effective_query_key=query_key,
+        )
 
     def list_papers(self) -> list[PaperMetadata]:
         with self._connect() as connection:
@@ -386,10 +514,94 @@ class SQLitePaperStore:
         payload = query.model_dump(mode="json")
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
+    @staticmethod
+    def legacy_query_key(query: RetrievalQuery) -> str:
+        payload = {
+            "topic": query.topic,
+            "category": query.category,
+            "start_date": query.start_date.isoformat() if query.start_date else None,
+            "end_date": query.end_date.isoformat() if query.end_date else None,
+            "start_index": query.start_index,
+            "max_results": query.max_results,
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def effective_query_key(
+        cls,
+        query: RetrievalQuery,
+        *,
+        query_plan: QueryPlan | None = None,
+    ) -> str:
+        if query_plan is None:
+            return cls.query_key(query)
+        payload = {
+            "query": query.model_dump(mode="json"),
+            "query_plan": cls._query_plan_cache_payload(query_plan),
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         return connection
+
+    @staticmethod
+    def _load_retrieval_run(
+        connection: sqlite3.Connection,
+        query_key: str,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT query_json, cache_status, retrieved_at
+            FROM retrieval_runs
+            WHERE query_key = ?
+            """,
+            (query_key,),
+        ).fetchone()
+
+    @staticmethod
+    def _cache_status_from_value(value: str | None) -> RetrievalCacheStatus:
+        if not value:
+            return RetrievalCacheStatus.COMPLETE
+        try:
+            return RetrievalCacheStatus(value)
+        except ValueError:
+            return RetrievalCacheStatus.COMPLETE
+
+    @staticmethod
+    def _query_plan_cache_payload(query_plan: QueryPlan) -> dict[str, Any]:
+        payload = query_plan.model_dump(mode="json")
+        planner = payload.get("planner")
+        if isinstance(planner, dict):
+            planner.pop("generated_at", None)
+        return payload
+
+    @staticmethod
+    def _source_metadata_json(
+        source_metadata: list[RetrievalSourceMetadata],
+    ) -> str:
+        payload = [
+            metadata.model_dump(mode="json")
+            for metadata in source_metadata
+        ]
+        return json.dumps(payload, sort_keys=True)
+
+    @staticmethod
+    def _source_metadata_from_json(payload_json: str) -> list[RetrievalSourceMetadata]:
+        try:
+            payload = json.loads(payload_json or "[]")
+        except json.JSONDecodeError:
+            return []
+        if isinstance(payload, dict):
+            payload = [payload] if payload else []
+        if not isinstance(payload, list):
+            return []
+        return [
+            RetrievalSourceMetadata.model_validate(item)
+            for item in payload
+            if isinstance(item, dict)
+        ]
 
     @staticmethod
     def _paper_full_text_cache_key(paper_id: str, source_url: str | None) -> str:

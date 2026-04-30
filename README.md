@@ -6,7 +6,7 @@ Local Agent + Skills project for daily arXiv paper monitoring, recommendation, f
 
 This repository is being built in staged units from `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`.
 
-Current stage: Unit 6, selected-paper deep explanation MVP.
+Current stage: Unit 7, Streamlit demo UI.
 
 ## Setup
 
@@ -25,6 +25,12 @@ python -m pip install -e . --no-build-isolation --no-deps
 ```
 
 All future Python packages should be installed into this conda environment. Prefer conda packages when available; use pip only inside the active conda environment when a package is not available through conda.
+
+To run the Streamlit demo UI from Unit 7, install the optional UI dependency set:
+
+```bash
+conda run -n daily-arxiv-agent python -m pip install -e '.[ui]'
+```
 
 Copy `.env.example` to `.env` for local settings. Keep real secrets out of git.
 
@@ -332,6 +338,40 @@ daily-arxiv-agent demo \
   --top-k 5 \
   --no-cache
 ```
+
+## Streamlit Demo UI
+
+Unit 7 adds a local Streamlit surface that reuses the same orchestrator methods as the CLI:
+
+- `daily_arxiv_agent.ui.streamlit_app`
+- `tests/test_ui_smoke.py`
+
+The page exposes:
+
+- topic, date, category, and seed-paper inputs for the recommendation workflow
+- visible workflow trace rows with status, evidence labels, and fallback details
+- like/dislike refinement tied to the original recommendation run ID
+- follow-up filtering against the local SQLite store
+- selected-paper deep explanation in method, experiment, and limitations modes
+
+The module imports without creating live-provider side effects. If `LLM_PROVIDER=openai` or another live provider is selected in the UI without credentials, the page shows a clear in-app error instead of failing during import.
+
+Fake-LLM run (this disables live LLM calls only; arXiv retrieval and seed-paper metadata lookup may still use the network):
+
+```bash
+export LLM_PROVIDER=fake
+conda run -n daily-arxiv-agent streamlit run src/daily_arxiv_agent/ui/streamlit_app.py
+```
+
+Environment-backed live run:
+
+```bash
+export LLM_PROVIDER=openai
+export OPENAI_API_KEY="<your-api-key>"
+conda run -n daily-arxiv-agent streamlit run src/daily_arxiv_agent/ui/streamlit_app.py
+```
+
+Acceptance/demo notes for the UI live in `docs/demo/unit7-demo-ui.md`.
 
 ## Planned Demo
 

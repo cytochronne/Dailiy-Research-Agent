@@ -322,7 +322,7 @@ Prerequisite for push: configure a git remote before the first accepted phase is
 - Manual acceptance artifact: one generated daily briefing in `docs/demo/`.
 - User accepts keyword ranking and briefing MVP, then the phase is committed and pushed.
 
-- [ ] **Unit 3: Seed-Paper Personalization**
+- [x] **Unit 3: Seed-Paper Personalization**
 
 **Goal:** Allow users to provide seed papers by arXiv ID, URL, or title; build a user interest representation; and rank new papers using seed-paper similarity.
 
@@ -366,7 +366,7 @@ Prerequisite for push: configure a git remote before the first accepted phase is
 - Manual acceptance artifact: seed-paper-based recommendation list in `docs/demo/`.
 - User accepts seed personalization, then the phase is committed and pushed.
 
-- [ ] **Unit 4: Feedback Refinement Loop**
+- [x] **Unit 4: Feedback Refinement Loop**
 
 **Goal:** Record like/dislike feedback, update the preference representation, and generate refined recommendations with change rationale.
 
@@ -408,7 +408,7 @@ Prerequisite for push: configure a git remote before the first accepted phase is
 - Manual acceptance artifact: before/after recommendation comparison in `docs/demo/`.
 - User accepts feedback refinement, then the phase is committed and pushed.
 
-- [ ] **Unit 5: Agent Orchestrator and Follow-up Queries**
+- [x] **Unit 5: Agent Orchestrator and Follow-up Queries**
 
 **Goal:** Wire Skills into coherent recommendation and follow-up workflows with inspectable intermediate steps.
 
@@ -449,7 +449,7 @@ Prerequisite for push: configure a git remote before the first accepted phase is
 - Manual acceptance artifact: workflow trace output in `docs/demo/`.
 - User accepts orchestrator and follow-up behavior, then the phase is committed and pushed.
 
-- [ ] **Unit 6: Paper-Level Deep Explanation**
+- [x] **Unit 6: Paper-Level Deep Explanation**
 
 **Goal:** Let users select a recommended paper and generate method/framework, experiment/results, and limitations explanations using full text when available.
 
@@ -491,7 +491,7 @@ Prerequisite for push: configure a git remote before the first accepted phase is
 - Manual acceptance artifact: three explanation outputs for one paper in `docs/demo/`.
 - User accepts deep explanation behavior, then the phase is committed and pushed.
 
-- [ ] **Unit 7: Streamlit Demo UI**
+- [x] **Unit 7: Streamlit Demo UI**
 
 **Goal:** Provide a local UI that demonstrates the Agent workflow, recommendation list, feedback loop, follow-up filtering, and deep explanation modes.
 

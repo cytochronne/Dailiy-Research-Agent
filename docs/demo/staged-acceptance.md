@@ -107,12 +107,13 @@ Plan file: `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`
 - [x] Invalid feedback values return a structured validation error.
 - [x] SQLite persists feedback events for later recommendation calls.
 - [x] Manual acceptance artifact exists at `docs/demo/unit4-feedback-refinement.md`.
-- [ ] User accepts Unit 4 before commit and push.
+- [x] User accepts Unit 4 before commit and push.
 
 ## Unit 4 Verification Record
 
 - Conda environment: `daily-arxiv-agent`
 - Tests: `48 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+- Commit: `6c1deea feat(unit4): add feedback refinement loop`
 - Manual artifact: before/after feedback comparison generated in `docs/demo/unit4-feedback-refinement.md`, including rank movement, score deltas, and rationale text.
 
 ## Unit 5 Acceptance Checklist
@@ -125,12 +126,13 @@ Plan file: `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`
 - [x] Skill failures appear in workflow trace and return top-level fallback output.
 - [x] CLI fixture demo runs a workflow end to end.
 - [x] Manual acceptance artifact exists at `docs/demo/unit5-workflow-trace.md`.
-- [ ] User accepts Unit 5 before commit and push.
+- [x] User accepts Unit 5 before commit and push.
 
 ## Unit 5 Verification Record
 
 - Conda environment: `daily-arxiv-agent`
 - Tests: `64 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+- Commit: `da4e665 fix(unit5): preserve workflow error and cache fallback semantics`
 - Manual artifact: workflow trace output generated in `docs/demo/unit5-workflow-trace.md`, including recommendation trace, follow-up local reuse, feedback refinement coverage, and fallback visibility.
 
 ## Unit 6 Acceptance Checklist
@@ -143,10 +145,29 @@ Plan file: `docs/plans/2026-04-21-001-feat-daily-arxiv-agent-plan.md`
 - [x] Missing selected paper returns a structured not-found error through the orchestrator.
 - [x] Selected-paper explanation can run after a recommendation workflow.
 - [x] Manual acceptance artifact exists at `docs/demo/unit6-deep-explanation.md`.
-- [ ] User accepts Unit 6 before commit and push.
+- [x] User accepts Unit 6 before commit and push.
 
 ## Unit 6 Verification Record
 
 - Conda environment: `daily-arxiv-agent`
 - Tests: `91 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+- Commit: `00dce6c feat(unit6): add selected-paper deep explanation workflow`
 - Manual artifact: three deterministic explanation outputs generated in `docs/demo/unit6-deep-explanation.md`, covering method, experiment, and limitations modes from full-text evidence plus documented fallback behavior.
+
+## Unit 7 Acceptance Checklist
+
+- [x] Streamlit app module exists at `src/daily_arxiv_agent/ui/streamlit_app.py`.
+- [x] App imports without side effects that require live API credentials.
+- [x] Recommendation helpers render ranked rows from structured recommendation objects.
+- [x] Workflow trace helpers render status, evidence labels, and fallback details.
+- [x] Empty recommendation states render a clear user-facing message.
+- [x] Fallback Skill results render a clear warning/error message without breaking the page.
+- [x] Manual acceptance artifact exists at `docs/demo/unit7-demo-ui.md`.
+- [x] User accepts Unit 7 before commit and push.
+
+## Unit 7 Verification Record
+
+- Conda environment: `daily-arxiv-agent`
+- Tests: `99 passed` with `conda run -n daily-arxiv-agent python -m pytest`
+- Manual artifact: `docs/demo/unit7-demo-ui.md` records the recommended demo setup, expected UI flow, and runtime checks for recommendation, feedback, explanation, and follow-up paths.
+- Commit: pending.

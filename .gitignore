@@ -29,3 +29,4 @@ build/
 .DS_Store
 
 run.sh
+run_ui.sh

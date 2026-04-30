@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Sequence
+from typing import Any, Sequence
 
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
@@ -15,6 +15,7 @@ from daily_arxiv_agent.contracts import (
     PaperDeepExplanation,
     PaperMetadata,
     Recommendation,
+    RetrievalQuery,
 )
 
 
@@ -206,11 +207,78 @@ class FakeLLMProvider:
             arxiv_url=paper.arxiv_url,
         )
 
+    def plan_queries(
+        self,
+        *,
+        query: RetrievalQuery,
+        deterministic_terms: Sequence[str],
+    ) -> dict[str, Any]:
+        """Return deterministic planner-shaped output for offline tests and demos."""
+
+        required_terms = _dedupe_list(deterministic_terms) or _planning_terms(
+            query.topic or ""
+        )
+        related_terms: list[str] = []
+        if "llm" in required_terms:
+            related_terms.append("language model")
+        if "robotic" in required_terms or "robot" in required_terms:
+            related_terms.append("embodied control")
+        if "agent" in required_terms:
+            related_terms.append("autonomous agent")
+
+        phrases = []
+        cleaned_topic = _planning_phrase(query.topic or "")
+        if cleaned_topic and len(cleaned_topic.split()) > 1:
+            phrases.append(cleaned_topic)
+        if "robotic" in required_terms and "manipulation" in required_terms:
+            phrases.append("robotic manipulation")
+
+        return {
+            "source": "fake_llm",
+            "model": "fake",
+            "required_terms": required_terms,
+            "phrases": _dedupe_list(phrases)[:4],
+            "related_terms": _dedupe_list(related_terms)[:4],
+            "suggested_categories": [query.category] if query.category else [],
+            "exclusions": [],
+            "rationale": "Deterministic fake provider expanded the retrieval topic.",
+        }
+
 
 def _first_sentence(text: str) -> str:
     stripped = " ".join(text.split())
     match = re.search(r"(.+?[.!?])(?:\s|$)", stripped)
     return match.group(1) if match else stripped
+
+
+def _planning_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    for token in re.findall(r"[a-z0-9]+", text.lower()):
+        normalized = _normalize_planning_token(token)
+        if normalized and normalized not in terms:
+            terms.append(normalized)
+    return terms[:8]
+
+
+def _planning_phrase(text: str) -> str:
+    return " ".join(_planning_terms(text))
+
+
+def _normalize_planning_token(token: str) -> str:
+    if len(token) > 4 and token.endswith("ies"):
+        return f"{token[:-3]}y"
+    if len(token) > 3 and token.endswith("s"):
+        return token[:-1]
+    return token
+
+
+def _dedupe_list(values: Sequence[str]) -> list[str]:
+    items: list[str] = []
+    for value in values:
+        normalized = " ".join(value.split())
+        if normalized and normalized not in items:
+            items.append(normalized)
+    return items
 
 
 def _contribution_from_text(text: str, topic: str) -> str:

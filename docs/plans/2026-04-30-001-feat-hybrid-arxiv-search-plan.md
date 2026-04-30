@@ -182,7 +182,7 @@ flowchart TD
 **Verification:**
 - Contracts validate new search parameters without breaking existing retrieval, ranking, and storage tests.
 
-- [ ] **Unit 2: Deterministic and LLM Query Planning**
+- [x] **Unit 2: Deterministic and LLM Query Planning**
 
 **Goal:** Create a query-planning Skill that turns user topic input into bounded, inspectable arXiv query variants, with optional LLM expansion and deterministic fallback.
 

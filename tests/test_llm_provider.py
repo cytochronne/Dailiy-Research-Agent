@@ -11,7 +11,9 @@ from daily_arxiv_agent.contracts import (
     PaperBriefingItem,
     PaperMetadata,
     Provenance,
+    RetrievalQuery,
     Recommendation,
+    SearchMode,
 )
 from daily_arxiv_agent.llm.fake import FakeLLMProvider
 import daily_arxiv_agent.llm.openai_provider as openai_provider_module
@@ -258,6 +260,66 @@ def test_briefing_uses_dedicated_retry_budget(
 
     assert summary == "Recovered summary."
     assert calls["count"] == 2
+
+
+def test_openai_provider_query_planning_uses_minimum_prompt_and_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_payloads: list[dict[str, object]] = []
+
+    def fake_urlopen(req, timeout):  # noqa: ANN001, ANN202
+        captured_payloads.append(json.loads(req.data.decode("utf-8")))
+        return _FakeHTTPResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "required_terms": ["robotic", "manipulation"],
+                                    "phrases": ["robotic manipulation"],
+                                    "related_terms": ["embodied control"],
+                                    "suggested_categories": ["cs.RO"],
+                                    "exclusions": ["survey"],
+                                    "rationale": "Expanded topic into robotics terms.",
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(openai_provider_module.request, "urlopen", fake_urlopen)
+    provider = OpenAILLMProvider(
+        api_key="sk-test",
+        model="gpt-5-mini",
+        max_retries=0,
+        output_retries=0,
+    )
+
+    plan = provider.plan_queries(
+        query=RetrievalQuery(
+            topic="robotic manipulation",
+            category="cs.RO",
+            search_mode=SearchMode.BROAD,
+        ),
+        deterministic_terms=["robotic", "manipulation"],
+    )
+
+    assert plan["required_terms"] == ["robotic", "manipulation"]
+    payload = captured_payloads[0]
+    assert payload["temperature"] == 0
+    assert payload["response_format"] == {"type": "json_object"}
+    prompt = "\n".join(
+        message["content"] for message in payload["messages"] if message["role"] == "user"
+    )
+    assert "Topic: robotic manipulation" in prompt
+    assert "Category filter: cs.RO" in prompt
+    assert "Search mode: broad" in prompt
+    assert "Abstract:" not in prompt
+    assert "Source text:" not in prompt
+    assert "full text" not in prompt.lower()
 
 
 def test_explain_paper_returns_mode_specific_structure(

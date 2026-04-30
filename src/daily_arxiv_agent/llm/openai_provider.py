@@ -20,6 +20,7 @@ from daily_arxiv_agent.contracts import (
     PaperDeepExplanation,
     PaperMetadata,
     Recommendation,
+    RetrievalQuery,
 )
 
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
@@ -237,6 +238,44 @@ class OpenAILLMProvider:
             output_retries=self.output_retries,
         )
 
+    def plan_queries(
+        self,
+        *,
+        query: RetrievalQuery,
+        deterministic_terms: Sequence[str],
+    ) -> dict[str, Any]:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You plan bounded arXiv metadata search queries. "
+                        "Return strict JSON only and avoid raw arXiv query syntax."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": _build_query_planning_prompt(
+                        query=query,
+                        deterministic_terms=deterministic_terms,
+                    ),
+                },
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
+        }
+        plan = self._complete_with_validation(
+            payload,
+            validator=_parse_query_planning_response,
+            max_retries=self.max_retries,
+            retry_backoff_seconds=self.retry_backoff_seconds,
+            output_retries=self.output_retries,
+        )
+        plan.setdefault("source", "llm")
+        plan.setdefault("model", self.model)
+        return plan
+
     def _chat_completion(
         self,
         payload: dict[str, Any],
@@ -397,6 +436,36 @@ def _build_explanation_prompt(
     )
 
 
+def _build_query_planning_prompt(
+    *,
+    query: RetrievalQuery,
+    deterministic_terms: Sequence[str],
+) -> str:
+    start_date = query.start_date.isoformat() if query.start_date else ""
+    end_date = query.end_date.isoformat() if query.end_date else ""
+    return (
+        "Use only the search intent fields below. Do not add paper-specific evidence.\n"
+        f"Topic: {query.topic or ''}\n"
+        f"Category filter: {query.category or ''}\n"
+        f"Start date filter: {start_date}\n"
+        f"End date filter: {end_date}\n"
+        f"Search mode: {query.search_mode.value}\n"
+        f"Deterministic required terms: {', '.join(deterministic_terms)}\n\n"
+        "Return JSON only with these keys:\n"
+        "{\n"
+        '  "required_terms": ["term"],\n'
+        '  "phrases": ["short phrase"],\n'
+        '  "related_terms": ["term"],\n'
+        '  "suggested_categories": ["cs.LG"],\n'
+        '  "exclusions": ["term"],\n'
+        '  "rationale": "<=1 sentence"\n'
+        "}\n"
+        "Limits: required_terms <= 8, phrases <= 4, related_terms <= 8, "
+        "suggested_categories <= 6. Terms should be words or short noun phrases, "
+        "not Boolean expressions."
+    )
+
+
 def _extract_content_text(payload: dict[str, Any]) -> str:
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
@@ -446,6 +515,25 @@ def _parse_summary_response(payload: dict[str, Any]) -> str:
     if not summary:
         raise RuntimeError("LLM briefing summary returned empty content.")
     return summary
+
+
+def _parse_query_planning_response(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        parsed = _parse_json_content(payload)
+    except RuntimeError as exc:
+        raise RuntimeError("LLM query planning did not return valid JSON.") from exc
+
+    plan = {
+        "required_terms": _normalize_list(parsed.get("required_terms")),
+        "phrases": _normalize_list(parsed.get("phrases")),
+        "related_terms": _normalize_list(parsed.get("related_terms")),
+        "suggested_categories": _normalize_list(parsed.get("suggested_categories")),
+        "exclusions": _normalize_list(parsed.get("exclusions")),
+        "rationale": _clean_text(parsed.get("rationale")),
+    }
+    if not plan["required_terms"] and not plan["phrases"] and not plan["related_terms"]:
+        raise RuntimeError("LLM query planning returned no usable terms.")
+    return plan
 
 
 def _parse_explanation_response(

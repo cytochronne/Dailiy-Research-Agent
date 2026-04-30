@@ -158,6 +158,7 @@ class QueryPlan(BaseModel):
     required_terms: list[str] = Field(default_factory=list)
     optional_terms: list[str] = Field(default_factory=list)
     phrases: list[str] = Field(default_factory=list)
+    exclusions: list[str] = Field(default_factory=list)
     rationale: str | None = None
 
     @property

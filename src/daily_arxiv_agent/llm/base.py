@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
@@ -11,6 +11,7 @@ from daily_arxiv_agent.contracts import (
     PaperDeepExplanation,
     PaperMetadata,
     Recommendation,
+    RetrievalQuery,
 )
 
 
@@ -43,3 +44,11 @@ class LLMProvider(Protocol):
         evidence_source: EvidenceSource,
     ) -> PaperDeepExplanation:
         """Return a mode-specific deep explanation for one selected paper."""
+
+    def plan_queries(
+        self,
+        *,
+        query: RetrievalQuery,
+        deterministic_terms: Sequence[str],
+    ) -> dict[str, Any]:
+        """Return structured query-planning terms for a retrieval query."""

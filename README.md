@@ -16,6 +16,13 @@ Use the dedicated conda environment for all Python work:
 conda activate daily-arxiv-agent
 ```
 
+Do not run project development, dependency installation, or tests from conda `base`
+unless explicitly requested. Non-interactive commands should use:
+
+```bash
+conda run -n daily-arxiv-agent python -m pytest -q
+```
+
 If the environment does not exist yet, create it with the Unit 0 dependencies:
 
 ```bash

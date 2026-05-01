@@ -183,6 +183,11 @@ class SQLitePaperStore:
         paper_list = list(papers)
         query_key = self.effective_query_key(query, query_plan=query_plan)
         source_metadata = source_metadata_by_paper_id or {}
+        if (
+            cache_status == RetrievalCacheStatus.PARTIAL
+            and self._has_complete_retrieval_result_set(query_key)
+        ):
+            return
         self.save_papers(paper_list)
 
         with self._connect() as connection:
@@ -287,6 +292,7 @@ class SQLitePaperStore:
             query=RetrievalQuery.model_validate_json(run["query_json"]),
             papers=papers,
             cache_status=cache_status,
+            metadata=self._metadata_from_json(run["metadata_json"]),
             source_metadata_by_paper_id=source_metadata_by_paper_id,
             retrieved_at=datetime.fromisoformat(run["retrieved_at"]),
             effective_query_key=query_key,
@@ -553,12 +559,22 @@ class SQLitePaperStore:
     ) -> sqlite3.Row | None:
         return connection.execute(
             """
-            SELECT query_json, cache_status, retrieved_at
+            SELECT query_json, cache_status, metadata_json, retrieved_at
             FROM retrieval_runs
             WHERE query_key = ?
             """,
             (query_key,),
         ).fetchone()
+
+    def _has_complete_retrieval_result_set(self, query_key: str) -> bool:
+        with self._connect() as connection:
+            row = self._load_retrieval_run(connection, query_key)
+        if row is None:
+            return False
+        return (
+            self._cache_status_from_value(row["cache_status"])
+            == RetrievalCacheStatus.COMPLETE
+        )
 
     @staticmethod
     def _cache_status_from_value(value: str | None) -> RetrievalCacheStatus:
@@ -602,6 +618,14 @@ class SQLitePaperStore:
             for item in payload
             if isinstance(item, dict)
         ]
+
+    @staticmethod
+    def _metadata_from_json(payload_json: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(payload_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     @staticmethod
     def _paper_full_text_cache_key(paper_id: str, source_url: str | None) -> str:

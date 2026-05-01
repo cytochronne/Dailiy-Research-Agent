@@ -222,6 +222,7 @@ class RetrievalResultSet(BaseModel):
     query: RetrievalQuery
     papers: list[PaperMetadata] = Field(default_factory=list)
     cache_status: RetrievalCacheStatus = RetrievalCacheStatus.COMPLETE
+    metadata: dict[str, Any] = Field(default_factory=dict)
     source_metadata_by_paper_id: dict[str, list[RetrievalSourceMetadata]] = Field(
         default_factory=dict
     )

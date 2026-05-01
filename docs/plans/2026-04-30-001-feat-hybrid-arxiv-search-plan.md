@@ -228,7 +228,7 @@ flowchart TD
 **Verification:**
 - Query planning can run fully offline and produces stable outputs for fixture topics.
 
-- [ ] **Unit 3: Multi-Query arXiv Retrieval, Pagination, and Dedupe**
+- [x] **Unit 3: Multi-Query arXiv Retrieval, Pagination, and Dedupe**
 
 **Goal:** Update arXiv retrieval to execute bounded query plans, page through metadata results, merge candidates, dedupe by arXiv paper ID, and cache the merged result set.
 

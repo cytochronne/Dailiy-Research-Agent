@@ -9,6 +9,7 @@ from daily_arxiv_agent.contracts import (
     ExplanationMode,
     PaperMetadata,
     Provenance,
+    QueryPlannerMode,
     Recommendation,
     RetrievalQuery,
     SkillError,
@@ -19,6 +20,7 @@ from daily_arxiv_agent.llm.fake import FakeLLMProvider
 from daily_arxiv_agent.orchestrator import DailyArxivAgentOrchestrator
 from daily_arxiv_agent.skills.arxiv_retrieval import ArxivRetrievalSkill
 from daily_arxiv_agent.skills.followup import FollowupQuery
+from daily_arxiv_agent.skills.query_planning import QueryPlanningSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
 
 
@@ -67,9 +69,14 @@ class SpyRetrievalSkill:
     def __init__(self) -> None:
         self.calls = 0
 
-    def retrieve(self, query, use_cache=True):  # noqa: ANN001, ANN201
+    def retrieve(self, query, use_cache=True, query_plan=None):  # noqa: ANN001, ANN201
         self.calls += 1
         raise AssertionError("follow-up should use stored papers before fetching")
+
+
+class RaisingPlannerProvider:
+    def plan_queries(self, **kwargs):  # noqa: ANN003, ANN201
+        raise RuntimeError("planner service unavailable")
 
 
 def make_paper(
@@ -133,6 +140,7 @@ def test_recommendation_workflow_returns_ordered_trace_and_briefing(tmp_path) ->
     assert workflow is not None
     assert workflow.run_id == "run-1"
     assert [step.skill for step in workflow.trace] == [
+        "query_planning",
         "arxiv_retrieval",
         "ranking",
         "extraction",
@@ -143,13 +151,142 @@ def test_recommendation_workflow_returns_ordered_trace_and_briefing(tmp_path) ->
         SkillStatus.SUCCESS,
         SkillStatus.SUCCESS,
         SkillStatus.SUCCESS,
+        SkillStatus.SUCCESS,
     ]
+    planning_metadata = workflow.trace[0].metadata
+    assert planning_metadata["source"] == "deterministic"
+    assert "query_variants" not in planning_metadata
+    assert "planner_rationale" not in planning_metadata
+    retrieval_metadata = workflow.trace[1].metadata
+    assert retrieval_metadata["candidate_count"] == 2
+    assert retrieval_metadata["cache_hit"] is False
+    assert retrieval_metadata["query_variant_count"] == 1
+    assert retrieval_metadata["planner_source"] == "deterministic"
+    assert "query_plan" not in retrieval_metadata
+    assert "request_params" not in retrieval_metadata
+    assert "source_metadata_by_paper_id" not in retrieval_metadata
+    assert "effective_query_key" not in retrieval_metadata
+    assert workflow.trace[2].metadata["ranking_mode"] == "query_plan"
+    assert "query_source" in workflow.trace[2].metadata["score_signals"]
     assert len(workflow.recommendations) == 2
     assert workflow.briefing is not None
     assert workflow.briefing.highlighted_paper is not None
     assert client.calls == 1
     assert result.provenance is not None
     assert len(result.provenance) == 2
+
+
+def test_recommendation_workflow_records_planner_fallback_and_continues(
+    tmp_path,
+) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    retrieval = ArxivRetrievalSkill(
+        store=store,
+        client=FakeClient(FIXTURE.read_text()),
+        request_delay_seconds=0,
+    )
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=store,
+        retrieval_skill=retrieval,
+        query_planning_skill=QueryPlanningSkill(provider=RaisingPlannerProvider()),
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic="agents",
+            category="cs.LG",
+            max_results=5,
+            query_planner_mode=QueryPlannerMode.LLM,
+        ),
+        top_k=2,
+        use_cache=False,
+        run_id="run-planner-fallback",
+    )
+
+    assert result.status == SkillStatus.FALLBACK
+    workflow = result.data
+    assert workflow is not None
+    planning_step = workflow.trace[0]
+    assert planning_step.skill == "query_planning"
+    assert planning_step.status == SkillStatus.FALLBACK
+    assert planning_step.fallback is True
+    assert planning_step.error_code == "query_planner_llm_failed"
+    assert planning_step.metadata["source"] == "deterministic"
+    assert planning_step.metadata["fallback"] is True
+    assert len(workflow.recommendations) == 2
+
+
+def test_category_date_only_recommendation_ranks_by_category_recency(
+    tmp_path,
+) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    retrieval = ArxivRetrievalSkill(
+        store=store,
+        client=FakeClient(FIXTURE.read_text()),
+        request_delay_seconds=0,
+    )
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=store,
+        retrieval_skill=retrieval,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            category="cs.LG",
+            start_date=date(2026, 4, 19),
+            end_date=date(2026, 4, 21),
+            max_results=5,
+        ),
+        top_k=2,
+        use_cache=False,
+        run_id="run-category-date",
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    workflow = result.data
+    assert workflow is not None
+    assert len(workflow.recommendations) == 2
+    ranking_step = workflow.trace[2]
+    assert ranking_step.skill == "ranking"
+    assert ranking_step.metadata["ranking_mode"] == "category_recency"
+
+
+def test_empty_retrieval_result_produces_empty_inspectable_workflow(tmp_path) -> None:
+    empty_feed = """<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>"""
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    retrieval = ArxivRetrievalSkill(
+        store=store,
+        client=FakeClient(empty_feed),
+        request_delay_seconds=0,
+    )
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=store,
+        retrieval_skill=retrieval,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(topic="unlikely topic", category="cs.LG", max_results=5),
+        top_k=2,
+        use_cache=False,
+        run_id="run-empty",
+    )
+
+    assert result.status == SkillStatus.EMPTY
+    workflow = result.data
+    assert workflow is not None
+    assert workflow.papers == []
+    assert workflow.recommendations == []
+    assert [step.skill for step in workflow.trace] == [
+        "query_planning",
+        "arxiv_retrieval",
+        "ranking",
+        "extraction",
+        "briefing",
+    ]
+    assert workflow.trace[1].status == SkillStatus.EMPTY
 
 
 def test_feedback_refinement_workflow_records_feedback_and_returns_updates(tmp_path) -> None:
@@ -246,7 +383,8 @@ def test_skill_failure_is_visible_in_trace_and_returns_workflow_error(tmp_path) 
     assert result.error.code == "retrieval_skill_failed"
     workflow = result.data
     assert workflow is not None
-    first_step = workflow.trace[0]
+    assert workflow.trace[0].skill == "query_planning"
+    first_step = workflow.trace[1]
     assert first_step.skill == "arxiv_retrieval"
     assert first_step.status == SkillStatus.ERROR
     assert first_step.fallback is True
@@ -271,7 +409,7 @@ def test_skill_fallback_is_visible_in_trace_and_returns_workflow_fallback(tmp_pa
     assert result.error.code == "cached_results_used"
     workflow = result.data
     assert workflow is not None
-    assert workflow.trace[0].status == SkillStatus.FALLBACK
+    assert workflow.trace[1].status == SkillStatus.FALLBACK
 
 
 def test_paper_explanation_workflow_runs_after_recommendation_workflow(tmp_path) -> None:
@@ -365,6 +503,7 @@ def test_cli_demo_runs_fixture_backed_workflow_end_to_end(
     assert exit_code == 0
     assert payload["status"] == "success"
     assert [step["skill"] for step in payload["data"]["trace"]] == [
+        "query_planning",
         "arxiv_retrieval",
         "ranking",
         "extraction",

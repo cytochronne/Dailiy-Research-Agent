@@ -11,13 +11,40 @@ from pydantic import BaseModel, Field, model_validator
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
     PaperMetadata,
+    QueryPlan,
     RetrievalQuery,
     SkillError,
     SkillResult,
     SkillStatus,
 )
 from daily_arxiv_agent.skills.arxiv_retrieval import ArxivRetrievalSkill
+from daily_arxiv_agent.skills.query_planning import build_deterministic_query_plan
 from daily_arxiv_agent.storage import SQLitePaperStore
+
+
+STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "is",
+    "of",
+    "on",
+    "or",
+    "over",
+    "the",
+    "to",
+    "using",
+    "via",
+    "with",
+}
 
 
 class FollowupQuery(BaseModel):
@@ -51,7 +78,9 @@ class FollowupSkill:
         self.retrieval_skill = retrieval_skill
 
     def query(self, query: FollowupQuery) -> SkillResult[list[PaperMetadata]]:
-        local_matches = _filter_papers(self.store.list_papers(), query)
+        retrieval_query = _retrieval_query_from_followup(query)
+        query_plan = build_deterministic_query_plan(retrieval_query)
+        local_matches = _filter_papers(self.store.list_papers(), query, query_plan)
         if local_matches:
             papers = local_matches[: query.max_results]
             return SkillResult[list[PaperMetadata]](
@@ -66,6 +95,8 @@ class FollowupSkill:
                     "fetch_attempted": False,
                     "query": query.model_dump(mode="json"),
                     "matched_count": len(local_matches),
+                    "query_variant_count": query_plan.variant_count,
+                    "planner_source": query_plan.planner.source,
                 },
             )
 
@@ -81,6 +112,8 @@ class FollowupSkill:
                     "fetch_attempted": False,
                     "query": query.model_dump(mode="json"),
                     "matched_count": 0,
+                    "query_variant_count": query_plan.variant_count,
+                    "planner_source": query_plan.planner.source,
                 },
             )
 
@@ -104,18 +137,17 @@ class FollowupSkill:
                     "fetch_attempted": False,
                     "query": query.model_dump(mode="json"),
                     "matched_count": 0,
+                    "query_variant_count": query_plan.variant_count,
+                    "planner_source": query_plan.planner.source,
                 },
             )
 
-        retrieval_query = RetrievalQuery(
-            topic=query.topic,
-            category=query.category,
-            start_date=query.start_date,
-            end_date=query.end_date,
-            max_results=query.max_results,
+        result = _retrieve_with_query_plan(
+            self.retrieval_skill,
+            retrieval_query,
+            query_plan=query_plan,
         )
-        result = self.retrieval_skill.retrieve(retrieval_query, use_cache=True)
-        papers = _filter_papers(result.data or [], query)[: query.max_results]
+        papers = _filter_papers(result.data or [], query, query_plan)[: query.max_results]
         status = (
             SkillStatus.EMPTY
             if result.status == SkillStatus.SUCCESS and not papers
@@ -129,6 +161,8 @@ class FollowupSkill:
                 "fetch_attempted": True,
                 "query": query.model_dump(mode="json"),
                 "matched_count": len(papers),
+                "query_variant_count": query_plan.variant_count,
+                "planner_source": query_plan.planner.source,
             }
         )
         return SkillResult[list[PaperMetadata]](
@@ -149,8 +183,9 @@ class FollowupSkill:
 def _filter_papers(
     papers: Sequence[PaperMetadata],
     query: FollowupQuery,
+    query_plan: QueryPlan,
 ) -> list[PaperMetadata]:
-    matches = [paper for paper in papers if _matches(paper, query)]
+    matches = [paper for paper in papers if _matches(paper, query, query_plan)]
     return sorted(
         matches,
         key=lambda paper: (
@@ -161,7 +196,7 @@ def _filter_papers(
     )
 
 
-def _matches(paper: PaperMetadata, query: FollowupQuery) -> bool:
+def _matches(paper: PaperMetadata, query: FollowupQuery, query_plan: QueryPlan) -> bool:
     if query.category and query.category not in paper.categories:
         return False
     if (query.start_date or query.end_date) and paper.published_date is None:
@@ -170,21 +205,39 @@ def _matches(paper: PaperMetadata, query: FollowupQuery) -> bool:
         return False
     if query.end_date and paper.published_date and paper.published_date > query.end_date:
         return False
-    if query.topic and not _topic_matches(paper, query.topic):
+    if query.topic and not _topic_matches(paper, query_plan):
         return False
     return True
 
 
-def _topic_matches(paper: PaperMetadata, topic: str) -> bool:
-    query_terms = _tokens(topic)
+def _topic_matches(paper: PaperMetadata, query_plan: QueryPlan) -> bool:
+    query_terms = set(query_plan.required_terms)
+    query_phrases = {_normalized_phrase(phrase) for phrase in query_plan.phrases}
     if not query_terms:
         return True
-    haystack = _tokens(f"{paper.title} {paper.abstract or ''} {' '.join(paper.categories)}")
+    text = f"{paper.title} {paper.abstract or ''} {' '.join(paper.categories)}"
+    haystack = _tokens(text)
+    haystack_text = _normalized_text(text)
+    if any(phrase and phrase in haystack_text for phrase in query_phrases):
+        return True
     return all(term in haystack for term in query_terms)
 
 
 def _tokens(text: str) -> set[str]:
-    return {_normalize_token(token) for token in re.findall(r"[a-z0-9]+", text.lower())}
+    tokens: set[str] = set()
+    for token in re.findall(r"[a-z0-9]+", text.lower()):
+        normalized = _normalize_token(token)
+        if normalized and normalized not in STOPWORDS:
+            tokens.add(normalized)
+    return tokens
+
+
+def _normalized_text(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _normalized_phrase(text: str) -> str:
+    return _normalized_text(text)
 
 
 def _normalize_token(token: str) -> str:
@@ -199,3 +252,31 @@ def _combined_evidence(papers: Sequence[PaperMetadata]) -> EvidenceSource:
     if any(paper.abstract for paper in papers):
         return EvidenceSource.ABSTRACT
     return EvidenceSource.METADATA
+
+
+def _retrieval_query_from_followup(query: FollowupQuery) -> RetrievalQuery:
+    return RetrievalQuery(
+        topic=query.topic,
+        category=query.category,
+        start_date=query.start_date,
+        end_date=query.end_date,
+        max_results=query.max_results,
+    )
+
+
+def _retrieve_with_query_plan(
+    retrieval_skill: ArxivRetrievalSkill,
+    retrieval_query: RetrievalQuery,
+    *,
+    query_plan: QueryPlan,
+) -> SkillResult[list[PaperMetadata]]:
+    try:
+        return retrieval_skill.retrieve(
+            retrieval_query,
+            use_cache=True,
+            query_plan=query_plan,
+        )
+    except TypeError as exc:
+        if "query_plan" not in str(exc):
+            raise
+        return retrieval_skill.retrieve(retrieval_query, use_cache=True)

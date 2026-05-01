@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from inspect import Parameter, signature
 from typing import Any, TypeVar
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ from daily_arxiv_agent.contracts import (
     PaperDeepExplanation,
     PaperMetadata,
     Provenance,
+    QueryPlan,
     Recommendation,
     RetrievalQuery,
     SeedPreference,
@@ -32,6 +34,10 @@ from daily_arxiv_agent.skills.deep_explanation import PaperDeepExplanationSkill
 from daily_arxiv_agent.skills.extraction import PaperExtractionSkill
 from daily_arxiv_agent.skills.feedback import FeedbackInput, FeedbackRefinementSkill
 from daily_arxiv_agent.skills.followup import FollowupQuery, FollowupSkill
+from daily_arxiv_agent.skills.query_planning import (
+    QueryPlanningSkill,
+    build_deterministic_query_plan,
+)
 from daily_arxiv_agent.skills.ranking import TopicRankingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
 
@@ -109,11 +115,15 @@ class DailyArxivAgentOrchestrator:
         briefing_skill: DailyBriefingSkill | None = None,
         feedback_skill: FeedbackRefinementSkill | None = None,
         followup_skill: FollowupSkill | None = None,
+        query_planning_skill: QueryPlanningSkill | None = None,
         deep_explanation_skill: PaperDeepExplanationSkill | None = None,
         provider: LLMProvider | None = None,
     ) -> None:
         config = AppConfig.from_env()
         self.store = store or SQLitePaperStore(config.db_path)
+        self.query_planning_skill = query_planning_skill or QueryPlanningSkill(
+            provider=provider
+        )
         self.retrieval_skill = retrieval_skill or ArxivRetrievalSkill(
             store=self.store,
             request_delay_seconds=config.arxiv_request_delay_seconds,
@@ -142,6 +152,7 @@ class DailyArxivAgentOrchestrator:
         use_cache: bool = True,
         run_id: str | None = None,
         include_profile_feedback: bool = True,
+        include_debug_trace: bool = False,
     ) -> SkillResult[RecommendationWorkflow]:
         """Run retrieval, ranking, extraction, and briefing with trace output."""
 
@@ -150,8 +161,35 @@ class DailyArxivAgentOrchestrator:
         workflow_topic = ranking_topic or "personalized research"
         trace: list[WorkflowTraceStep] = []
 
+        planning_result = _query_plan_or_fallback(
+            query,
+            _safe_skill_call(
+                lambda: self.query_planning_skill.plan(query),
+                data_default=None,
+                error_code="query_planning_skill_failed",
+            ),
+        )
+        query_plan = planning_result.data
+        _append_trace(
+            trace,
+            skill="query_planning",
+            input_summary=_query_summary(query),
+            result=planning_result,
+            output_summary=_query_plan_output_summary(planning_result),
+            metadata=_trace_metadata(
+                "query_planning",
+                planning_result.metadata,
+                include_debug=include_debug_trace,
+            ),
+        )
+
         retrieval_result = _safe_skill_call(
-            lambda: self.retrieval_skill.retrieve(query, use_cache=use_cache),
+            lambda: _retrieve_with_optional_query_plan(
+                self.retrieval_skill,
+                query,
+                use_cache=use_cache,
+                query_plan=query_plan,
+            ),
             data_default=[],
             error_code="retrieval_skill_failed",
         )
@@ -162,6 +200,11 @@ class DailyArxivAgentOrchestrator:
             input_summary=_query_summary(query),
             result=retrieval_result,
             output_summary=f"{len(papers)} paper(s) retrieved",
+            metadata=_trace_metadata(
+                "arxiv_retrieval",
+                retrieval_result.metadata,
+                include_debug=include_debug_trace,
+            ),
         )
 
         active_seed = seed_preference or self.store.load_seed_preference(profile_id)
@@ -177,6 +220,11 @@ class DailyArxivAgentOrchestrator:
                 seed_preference=active_seed,
                 feedback_events=feedback_events,
                 top_k=top_k,
+                query_plan=query_plan,
+                retrieval_query=query,
+                retrieval_source_metadata_by_paper_id=retrieval_result.metadata.get(
+                    "source_metadata_by_paper_id"
+                ),
             ),
             data_default=[],
             error_code="ranking_skill_failed",
@@ -191,6 +239,11 @@ class DailyArxivAgentOrchestrator:
             ),
             result=ranking_result,
             output_summary=f"{len(recommendations)} recommendation(s) ranked",
+            metadata=_trace_metadata(
+                "ranking",
+                ranking_result.metadata,
+                include_debug=include_debug_trace,
+            ),
         )
 
         extraction_result, item_results = self._extract_recommendations(
@@ -236,6 +289,7 @@ class DailyArxivAgentOrchestrator:
             trace=trace,
         )
         results: list[SkillResult[Any]] = [
+            planning_result,
             retrieval_result,
             ranking_result,
             extraction_result,
@@ -321,11 +375,14 @@ class DailyArxivAgentOrchestrator:
         *,
         top_k: int = 5,
         run_id: str | None = None,
+        include_debug_trace: bool = False,
     ) -> SkillResult[FollowupWorkflow]:
         """Run a local-first follow-up query and rank matching papers when possible."""
 
         workflow_run_id = run_id or uuid4().hex
         trace: list[WorkflowTraceStep] = []
+        retrieval_query = _retrieval_query_from_followup(query)
+        query_plan = build_deterministic_query_plan(retrieval_query)
         followup_result = _safe_skill_call(
             lambda: self.followup_skill.query(query),
             data_default=[],
@@ -338,16 +395,26 @@ class DailyArxivAgentOrchestrator:
             input_summary=_followup_summary(query),
             result=followup_result,
             output_summary=f"{len(papers)} paper(s) matched",
+            metadata=_trace_metadata(
+                "followup_filter",
+                followup_result.metadata,
+                include_debug=include_debug_trace,
+            ),
         )
 
         results: list[SkillResult[Any]] = [followup_result]
         recommendations: list[Recommendation] = []
-        if papers and query.topic:
+        if papers and _followup_should_rank(query):
             ranking_result = _safe_skill_call(
                 lambda: self.ranking_skill.rank(
                     papers,
                     topic=query.topic,
                     top_k=top_k,
+                    query_plan=query_plan,
+                    retrieval_query=retrieval_query,
+                    retrieval_source_metadata_by_paper_id=followup_result.metadata.get(
+                        "source_metadata_by_paper_id"
+                    ),
                 ),
                 data_default=[],
                 error_code="followup_ranking_failed",
@@ -360,6 +427,11 @@ class DailyArxivAgentOrchestrator:
                 input_summary=f"topic={query.topic!r}; top_k={top_k}",
                 result=ranking_result,
                 output_summary=f"{len(recommendations)} follow-up recommendation(s)",
+                metadata=_trace_metadata(
+                    "ranking",
+                    ranking_result.metadata,
+                    include_debug=include_debug_trace,
+                ),
             )
 
         workflow = FollowupWorkflow(
@@ -535,6 +607,201 @@ class DailyArxivAgentOrchestrator:
         )
 
 
+def _query_plan_or_fallback(
+    query: RetrievalQuery,
+    result: SkillResult[QueryPlan | None],
+) -> SkillResult[QueryPlan]:
+    if result.data is not None:
+        return SkillResult[QueryPlan](
+            status=result.status,
+            data=result.data,
+            evidence_source=result.evidence_source,
+            provenance=result.provenance,
+            error=result.error,
+            message=result.message,
+            metadata=result.metadata,
+        )
+
+    fallback_plan = build_deterministic_query_plan(query)
+    error = result.error or SkillError(
+        code="query_planning_failed",
+        message="Query planning failed before producing a plan.",
+        retryable=True,
+    )
+    return SkillResult[QueryPlan](
+        status=SkillStatus.FALLBACK,
+        data=fallback_plan,
+        evidence_source=EvidenceSource.METADATA,
+        error=error,
+        message="Using deterministic query planning fallback.",
+        metadata={
+            "requested_mode": fallback_plan.planner.requested_mode.value,
+            "source": fallback_plan.planner.source,
+            "fallback": True,
+            "fallback_reason": error.message,
+            "query_variant_count": fallback_plan.variant_count,
+            "safe_to_persist": [
+                "requested_mode",
+                "source",
+                "query_variant_count",
+            ],
+            "debug_only": ["query_variants", "planner_rationale"],
+            "query_variants": [
+                variant.model_dump(mode="json") for variant in fallback_plan.variants
+            ],
+        },
+    )
+
+
+def _query_plan_output_summary(result: SkillResult[QueryPlan]) -> str:
+    plan = result.data
+    variant_count = plan.variant_count if plan is not None else 0
+    source = result.metadata.get("source")
+    if source is None and plan is not None:
+        source = plan.planner.source
+    summary = f"{variant_count} query variant(s) planned via {source or 'unknown'}"
+    if result.status in {SkillStatus.FALLBACK, SkillStatus.ERROR}:
+        return f"{summary}; fallback visible"
+    return summary
+
+
+def _trace_metadata(
+    skill: str,
+    metadata: dict[str, Any],
+    *,
+    include_debug: bool,
+) -> dict[str, Any]:
+    if include_debug:
+        return metadata
+
+    if skill == "query_planning":
+        return _pick_metadata(
+            metadata,
+            (
+                "requested_mode",
+                "source",
+                "fallback",
+                "fallback_reason",
+                "query_variant_count",
+                "required_terms",
+                "optional_terms",
+                "phrases",
+                "exclusions",
+                "safe_to_persist",
+                "debug_only",
+            ),
+        )
+
+    if skill == "arxiv_retrieval":
+        redacted = _pick_metadata(
+            metadata,
+            (
+                "cache_hit",
+                "query_variant_count",
+                "request_count",
+                "candidate_count",
+                "candidate_target",
+                "cache_status",
+                "budget_exhausted",
+            ),
+        )
+        partial_failures = metadata.get("partial_failures")
+        if isinstance(partial_failures, list):
+            redacted["partial_failures"] = [
+                {
+                    key: value
+                    for key, value in item.items()
+                    if key != "query"
+                }
+                for item in partial_failures
+                if isinstance(item, dict)
+            ]
+        query_plan = metadata.get("query_plan")
+        if isinstance(query_plan, dict):
+            planner = query_plan.get("planner")
+            if isinstance(planner, dict):
+                redacted["planner_source"] = planner.get("source")
+                redacted["planner_fallback"] = bool(planner.get("fallback_reason"))
+        return redacted
+
+    if skill == "ranking":
+        return _pick_metadata(
+            metadata,
+            (
+                "topic",
+                "top_k",
+                "seed_profile_id",
+                "feedback_count",
+                "ranking_mode",
+                "score_signals",
+                "qualifying_count",
+                "fallback_count",
+                "minimum_evidence_score",
+            ),
+        )
+
+    if skill == "followup_filter":
+        return _pick_metadata(
+            metadata,
+            (
+                "source",
+                "local_hit",
+                "fetch_attempted",
+                "matched_count",
+                "query_variant_count",
+                "planner_source",
+                "cache_hit",
+                "cache_status",
+                "candidate_count",
+            ),
+        )
+
+    return metadata
+
+
+def _pick_metadata(metadata: dict[str, Any], keys: Sequence[str]) -> dict[str, Any]:
+    return {key: metadata[key] for key in keys if key in metadata}
+
+
+def _retrieval_query_from_followup(query: FollowupQuery) -> RetrievalQuery:
+    return RetrievalQuery(
+        topic=query.topic,
+        category=query.category,
+        start_date=query.start_date,
+        end_date=query.end_date,
+        max_results=query.max_results,
+    )
+
+
+def _followup_should_rank(query: FollowupQuery) -> bool:
+    return bool(query.topic or query.category or query.start_date or query.end_date)
+
+
+def _retrieve_with_optional_query_plan(
+    retrieval_skill: Any,
+    query: RetrievalQuery,
+    *,
+    use_cache: bool,
+    query_plan: QueryPlan,
+) -> SkillResult[list[PaperMetadata]]:
+    retrieve = retrieval_skill.retrieve
+    if _call_accepts_keyword(retrieve, "query_plan"):
+        return retrieve(query, use_cache=use_cache, query_plan=query_plan)
+    return retrieve(query, use_cache=use_cache)
+
+
+def _call_accepts_keyword(call: Callable[..., Any], keyword: str) -> bool:
+    try:
+        parameters = signature(call).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(
+        parameter.name == keyword
+        or parameter.kind == Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
 def _safe_skill_call(
     call: Callable[[], SkillResult[ResultT]],
     *,
@@ -563,6 +830,7 @@ def _append_trace(
     input_summary: str,
     result: SkillResult[Any],
     output_summary: str,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     trace.append(
         WorkflowTraceStep(
@@ -575,7 +843,7 @@ def _append_trace(
             fallback=result.status in {SkillStatus.FALLBACK, SkillStatus.ERROR},
             error_code=result.error.code if result.error else None,
             error_message=result.error.message if result.error else None,
-            metadata=result.metadata,
+            metadata=result.metadata if metadata is None else metadata,
         )
     )
 

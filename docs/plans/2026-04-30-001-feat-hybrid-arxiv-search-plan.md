@@ -311,7 +311,7 @@ flowchart TD
 **Verification:**
 - Ranking rationale and score breakdown explain why papers moved without depending on live services.
 
-- [ ] **Unit 5: Orchestrator, Follow-Up, and Trace Integration**
+- [x] **Unit 5: Orchestrator, Follow-Up, and Trace Integration**
 
 **Goal:** Wire query planning, enhanced retrieval, and hybrid ranking into the Agent workflow and update follow-up search behavior without losing local-first semantics.
 

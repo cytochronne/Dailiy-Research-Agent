@@ -41,9 +41,11 @@ class SpyRetrievalSkill:
     def __init__(self, papers: list[PaperMetadata] | None = None) -> None:
         self.papers = papers or []
         self.calls = 0
+        self.query_plans = []
 
-    def retrieve(self, query, use_cache=True):  # noqa: ANN001, ANN201
+    def retrieve(self, query, use_cache=True, query_plan=None):  # noqa: ANN001, ANN201
         self.calls += 1
+        self.query_plans.append(query_plan)
         return SkillResult[list[PaperMetadata]](
             status=SkillStatus.SUCCESS if self.papers else SkillStatus.EMPTY,
             data=self.papers,
@@ -83,6 +85,27 @@ def test_followup_filters_stored_papers_without_refetching(tmp_path) -> None:
     assert retrieval.calls == 0
     assert result.metadata["local_hit"] is True
     assert result.metadata["fetch_attempted"] is False
+    assert result.metadata["planner_source"] == "deterministic"
+
+
+def test_followup_local_filter_uses_planner_normalized_terms(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    matching = make_paper(
+        "2604.00001",
+        "Explainable Agents for Daily Research Briefings",
+        "Research briefing workflows rank papers from preference signals.",
+    )
+    store.save_papers([matching])
+    retrieval = SpyRetrievalSkill()
+
+    result = FollowupSkill(store=store, retrieval_skill=retrieval).query(
+        FollowupQuery(topic="agents for workflows", category="cs.LG")
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    assert [paper.paper_id for paper in result.data or []] == ["2604.00001"]
+    assert retrieval.calls == 0
+    assert result.metadata["query_variant_count"] == 1
 
 
 def test_followup_fetches_only_when_no_stored_papers_match(tmp_path) -> None:
@@ -101,8 +124,10 @@ def test_followup_fetches_only_when_no_stored_papers_match(tmp_path) -> None:
     assert result.status == SkillStatus.SUCCESS
     assert [paper.paper_id for paper in result.data or []] == ["2604.00003"]
     assert retrieval.calls == 1
+    assert retrieval.query_plans[0] is not None
     assert result.metadata["local_hit"] is False
     assert result.metadata["fetch_attempted"] is True
+    assert result.metadata["query_variant_count"] == 1
 
 
 def test_followup_returns_empty_when_fetched_papers_still_do_not_match(tmp_path) -> None:

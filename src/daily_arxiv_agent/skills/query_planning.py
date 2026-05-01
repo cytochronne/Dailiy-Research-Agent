@@ -71,10 +71,11 @@ class QueryPlanningSkill:
     def plan(self, query: RetrievalQuery) -> SkillResult[QueryPlan]:
         """Return a bounded query plan, falling back to deterministic output."""
 
+        max_variants = _variant_limit(query, self.max_variants)
         deterministic_plan = build_deterministic_query_plan(
             query,
             requested_mode=query.query_planner_mode,
-            max_variants=self.max_variants,
+            max_variants=max_variants,
         )
         requested_mode = query.query_planner_mode
         if requested_mode == QueryPlannerMode.DETERMINISTIC:
@@ -111,7 +112,7 @@ class QueryPlanningSkill:
                 raw_plan,
                 deterministic_plan=deterministic_plan,
                 requested_mode=requested_mode,
-                max_variants=self.max_variants,
+                max_variants=max_variants,
             )
         except ValueError as exc:
             return _fallback_result(
@@ -139,6 +140,7 @@ def build_deterministic_query_plan(
 ) -> QueryPlan:
     """Build a stable local query plan from user retrieval inputs."""
 
+    max_variants = _variant_limit(query, max_variants)
     required_terms = _topic_terms(query.topic)
     phrases = _topic_phrases(query.topic, required_terms)
     variants = _build_variants(
@@ -161,6 +163,13 @@ def build_deterministic_query_plan(
         phrases=phrases,
         rationale="Deterministic plan from normalized topic terms and filters.",
     )
+
+
+def _variant_limit(query: RetrievalQuery, configured_limit: int) -> int:
+    budget_limit = max(query.max_requests, 1)
+    if query.search_mode == SearchMode.STRICT:
+        return 1
+    return max(min(configured_limit, budget_limit), 1)
 
 
 def _plan_from_provider_output(

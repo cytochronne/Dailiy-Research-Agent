@@ -14,6 +14,8 @@ from daily_arxiv_agent.contracts import (
     QueryPlanVariant,
     QueryPlannerMode,
     QueryPlannerProvenance,
+    RankingScoreBreakdown,
+    Recommendation,
     RetrievalBudget,
     RetrievalQuery,
     RetrievalSourceMetadata,
@@ -198,6 +200,31 @@ def test_retrieval_source_metadata_is_run_scoped() -> None:
     assert metadata.variant_label == "broad_terms"
     assert metadata.first_seen_order == 1
     assert metadata.query == 'all:"agent"'
+
+
+def test_recommendation_can_expose_score_breakdown() -> None:
+    paper = make_paper()
+    breakdown = RankingScoreBreakdown(
+        lexical=3.0,
+        phrase=2.0,
+        total=5.0,
+        evidence_score=5.0,
+        matched_terms=["agent"],
+        matched_phrases=["agent architecture"],
+        signals=["lexical", "phrase"],
+    )
+
+    recommendation = Recommendation(
+        paper=paper,
+        rank=1,
+        score=5.0,
+        rationale="Matched explicit terms: agent.",
+        score_breakdown=breakdown,
+    )
+
+    assert recommendation.score_breakdown is not None
+    assert recommendation.score_breakdown.total == 5.0
+    assert recommendation.score_breakdown.signals == ["lexical", "phrase"]
 
 
 def test_deep_explanation_contract_supports_mode_specific_sections() -> None:

@@ -271,7 +271,7 @@ flowchart TD
 **Verification:**
 - Retrieval remains fixture-testable and live-safe, and cache behavior is based on effective search strategy rather than raw topic only.
 
-- [ ] **Unit 4: Hybrid Ranking and Evidence-Aware Top-K**
+- [x] **Unit 4: Hybrid Ranking and Evidence-Aware Top-K**
 
 **Goal:** Upgrade ranking to use multiple explainable signals and stop treating every non-matching candidate as equivalent filler.
 

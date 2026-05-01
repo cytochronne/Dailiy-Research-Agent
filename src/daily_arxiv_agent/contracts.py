@@ -230,6 +230,24 @@ class RetrievalResultSet(BaseModel):
     effective_query_key: str
 
 
+class RankingScoreBreakdown(BaseModel):
+    """Explainable score components for one ranked recommendation."""
+
+    lexical: float = 0.0
+    phrase: float = 0.0
+    query_source: float = 0.0
+    recency: float = 0.0
+    category: float = 0.0
+    seed_similarity: float = 0.0
+    feedback: float = 0.0
+    total: float = 0.0
+    evidence_score: float = 0.0
+    fallback: bool = False
+    matched_terms: list[str] = Field(default_factory=list)
+    matched_phrases: list[str] = Field(default_factory=list)
+    signals: list[str] = Field(default_factory=list)
+
+
 class SeedRecord(BaseModel):
     """One normalized seed contribution for personalization."""
 
@@ -285,6 +303,7 @@ class Recommendation(BaseModel):
     previous_score: float | None = None
     score_delta: float | None = None
     rank_delta: int | None = None
+    score_breakdown: RankingScoreBreakdown | None = None
 
 
 class FeedbackEvent(BaseModel):

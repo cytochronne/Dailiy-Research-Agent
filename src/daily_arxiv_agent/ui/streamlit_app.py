@@ -14,7 +14,10 @@ from daily_arxiv_agent.contracts import (
     EvidenceSource,
     ExplanationMode,
     PaperDeepExplanation,
+    QueryPlannerMode,
     Recommendation,
+    RetrievalQuery,
+    SearchMode,
     SkillResult,
     SkillStatus,
 )
@@ -41,6 +44,15 @@ NEUTRAL_FEEDBACK = "neutral"
 PROVIDER_MODES = {
     DEFAULT_PROVIDER_MODE: "Fake LLM only (arXiv may still be live)",
     "environment": "Configured live LLM provider",
+}
+SEARCH_MODE_LABELS = {
+    SearchMode.BROAD.value: "Broad search",
+    SearchMode.STRICT.value: "Strict search",
+}
+QUERY_PLANNER_LABELS = {
+    QueryPlannerMode.AUTO.value: "Auto",
+    QueryPlannerMode.DETERMINISTIC.value: "Deterministic",
+    QueryPlannerMode.LLM.value: "LLM",
 }
 APP_CSS = """
 <style>
@@ -312,6 +324,7 @@ def workflow_trace_rows(trace: Sequence[WorkflowTraceStep]) -> list[dict[str, ob
 
     rows: list[dict[str, object]] = []
     for step in trace:
+        metadata = step.metadata
         rows.append(
             {
                 "step": step.step,
@@ -326,9 +339,46 @@ def workflow_trace_rows(trace: Sequence[WorkflowTraceStep]) -> list[dict[str, ob
                 "input": step.input_summary,
                 "output": step.output_summary,
                 "error": _format_trace_error(step),
+                "planner_source": _planner_source_for_step(step),
+                "planner_fallback": _planner_fallback_for_step(step),
+                "query_variants": _metadata_text(metadata.get("query_variant_count")),
+                "candidates": _metadata_text(metadata.get("candidate_count")),
+                "cache": _cache_summary_for_step(step),
+                "ranking_mode": _metadata_text(metadata.get("ranking_mode")),
             }
         )
     return rows
+
+
+def recommendation_summary_metrics(
+    workflow: RecommendationWorkflow,
+) -> dict[str, object]:
+    """Build concise recommendation-run metrics for CLI/UI parity tests."""
+
+    planning_metadata = _metadata_for_skill(workflow.trace, "query_planning")
+    retrieval_metadata = _metadata_for_skill(workflow.trace, "arxiv_retrieval")
+    planner_fallback = (
+        planning_metadata.get("fallback")
+        or retrieval_metadata.get("planner_fallback")
+        or False
+    )
+    return {
+        "run_id": workflow.run_id[:12],
+        "candidate_pool_size": workflow.query.effective_candidate_pool_size,
+        "candidates_retrieved": _metadata_int(
+            retrieval_metadata.get("candidate_count"),
+            default=len(workflow.papers),
+        ),
+        "recommendations_shown": len(workflow.recommendations),
+        "planner_source": (
+            planning_metadata.get("source")
+            or retrieval_metadata.get("planner_source")
+            or "unknown"
+        ),
+        "planner_fallback": "yes" if bool(planner_fallback) else "no",
+        "cache_status": retrieval_metadata.get("cache_status") or "unknown",
+        "cache_hit": "yes" if retrieval_metadata.get("cache_hit") is True else "no",
+    }
 
 
 def briefing_rows(briefing: DailyBriefing | None) -> list[dict[str, object]]:
@@ -427,17 +477,38 @@ def main() -> None:
 
 def _render_sidebar(st: Any, state: MutableMapping[str, Any]) -> None:
     config = AppConfig.from_env()
+    provider_options = list(PROVIDER_MODES)
+    planner_options = [mode.value for mode in QueryPlannerMode]
     with st.sidebar:
         st.markdown("### Runtime")
         state["provider_mode"] = st.selectbox(
             "LLM mode",
-            options=list(PROVIDER_MODES),
-            index=list(PROVIDER_MODES).index(state["provider_mode"]),
+            options=provider_options,
+            index=_option_index(provider_options, state["provider_mode"]),
             format_func=lambda value: PROVIDER_MODES[value],
             help=(
                 "Use fake mode to disable live LLM calls. arXiv retrieval and "
                 "seed-paper metadata lookup may still use the network."
             ),
+        )
+        state["query_planner_mode"] = st.selectbox(
+            "Query planner",
+            options=planner_options,
+            index=_option_index(
+                planner_options,
+                state["query_planner_mode"],
+                default_value=config.query_planner_mode.value,
+            ),
+            format_func=lambda value: QUERY_PLANNER_LABELS[value],
+            help=(
+                "Auto uses deterministic planning in fake mode and can use the configured "
+                "live provider when available."
+            ),
+        )
+        state["include_debug_trace"] = st.toggle(
+            "Show debug trace details",
+            value=bool(state["include_debug_trace"]),
+            help="When enabled, trace metadata may include raw query variants and planner rationale.",
         )
         state["profile_id"] = st.text_input(
             "Profile ID",
@@ -518,6 +589,7 @@ def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -
         unsafe_allow_html=True,
     )
     today = date.today()
+    search_options = [mode.value for mode in SearchMode]
     with st.form("recommendation_workflow_form"):
         left, right = st.columns([1.1, 0.9])
         with left:
@@ -537,12 +609,37 @@ def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -
                 "End date",
                 value=state["end_date"] or today,
             )
-            max_results = st.number_input(
-                "Max retrieved papers",
-                min_value=1,
-                max_value=100,
-                value=int(state["max_results"]),
+            search_mode = st.selectbox(
+                "Search mode",
+                options=search_options,
+                index=_option_index(
+                    search_options,
+                    state["search_mode"],
+                    default_value=SearchMode.BROAD.value,
+                ),
+                format_func=lambda value: SEARCH_MODE_LABELS[value],
+                help="Broad expands into multiple planned queries; strict keeps narrower exact-query behavior.",
             )
+            candidate_pool_size = st.number_input(
+                "Candidate pool size",
+                min_value=1,
+                max_value=500,
+                value=int(state["candidate_pool_size"]),
+                help="Papers to gather before ranking. Top K controls the final recommendation count.",
+            )
+            with st.expander("Retrieval budget", expanded=False):
+                page_size = st.number_input(
+                    "arXiv page size",
+                    min_value=1,
+                    max_value=100,
+                    value=int(state["arxiv_page_size"]),
+                )
+                max_requests = st.number_input(
+                    "Max arXiv requests",
+                    min_value=1,
+                    max_value=20,
+                    value=int(state["arxiv_max_requests"]),
+                )
         submitted = st.form_submit_button("Run recommendation workflow", use_container_width=True)
 
     if submitted:
@@ -551,7 +648,11 @@ def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -
         state["seed_input"] = seed_input
         state["start_date"] = start_date
         state["end_date"] = end_date
-        state["max_results"] = int(max_results)
+        state["search_mode"] = search_mode
+        state["candidate_pool_size"] = int(candidate_pool_size)
+        state["max_results"] = int(candidate_pool_size)
+        state["arxiv_page_size"] = int(page_size)
+        state["arxiv_max_requests"] = int(max_requests)
         _run_recommendation_workflow(state)
 
     recommendation_result = state.get("recommendation_result")
@@ -570,10 +671,19 @@ def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -
 
     workflow = _workflow_from_result(recommendation_result)
     if workflow is not None:
-        run_columns = st.columns(3)
-        run_columns[0].metric("Run ID", workflow.run_id[:12])
-        run_columns[1].metric("Topic", workflow.topic)
-        run_columns[2].metric("Seed entries", _seed_count_from_result(seed_result))
+        summary = recommendation_summary_metrics(workflow)
+        run_columns = st.columns(6)
+        run_columns[0].metric("Run ID", summary["run_id"])
+        run_columns[1].metric("Candidates", summary["candidates_retrieved"])
+        run_columns[2].metric("Recommendations", summary["recommendations_shown"])
+        run_columns[3].metric("Planner", str(summary["planner_source"]))
+        run_columns[4].metric("Fallback", summary["planner_fallback"])
+        run_columns[5].metric("Cache", summary["cache_status"])
+        st.caption(
+            f"Candidate pool target: {summary['candidate_pool_size']} | "
+            f"Cache hit: {summary['cache_hit']} | "
+            f"Seed entries: {_seed_count_from_result(seed_result)}"
+        )
 
     empty_message = recommendation_empty_state_message(recommendation_result)
     if empty_message:
@@ -825,6 +935,7 @@ def _run_recommendation_workflow(state: MutableMapping[str, Any]) -> None:
             profile_id=str(state["profile_id"]),
             top_k=int(state["top_k"]),
             use_cache=bool(state["use_cache"]),
+            include_debug_trace=bool(state["include_debug_trace"]),
         )
     except Exception as exc:
         _record_action_error(state, exc)
@@ -953,15 +1064,18 @@ def _build_runtime(*, provider_mode: str, db_path: str) -> RuntimeContext:
     )
 
 
-def _build_retrieval_query(state: Mapping[str, Any]):
-    from daily_arxiv_agent.contracts import RetrievalQuery
-
+def _build_retrieval_query(state: Mapping[str, Any]) -> RetrievalQuery:
     return RetrievalQuery(
         topic=_normalized_text(str(state["topic"])) or None,
         category=_normalized_text(str(state["category"])) or None,
         start_date=state["start_date"],
         end_date=state["end_date"],
         max_results=int(state["max_results"]),
+        search_mode=SearchMode(str(state["search_mode"])),
+        candidate_pool_size=int(state["candidate_pool_size"]),
+        page_size=int(state["arxiv_page_size"]),
+        max_requests=int(state["arxiv_max_requests"]),
+        query_planner_mode=QueryPlannerMode(str(state["query_planner_mode"])),
     )
 
 
@@ -1031,16 +1145,23 @@ def _render_runtime_error(st: Any, state: Mapping[str, Any]) -> None:
 
 def _ensure_session_state(state: MutableMapping[str, Any]) -> None:
     today = date.today()
+    config = AppConfig.from_env()
     defaults = {
         "provider_mode": DEFAULT_PROVIDER_MODE,
         "profile_id": DEFAULT_PROFILE_ID,
-        "db_path": AppConfig.from_env().db_path,
+        "db_path": config.db_path,
         "runtime_label": DEFAULT_PROVIDER_MODE,
         "topic": "agent briefing",
         "category": "cs.LG",
         "start_date": today - timedelta(days=7),
         "end_date": today,
         "max_results": DEFAULT_MAX_RESULTS,
+        "search_mode": config.search_mode.value,
+        "candidate_pool_size": config.candidate_pool_size,
+        "arxiv_page_size": config.arxiv_page_size,
+        "arxiv_max_requests": config.arxiv_max_requests_per_search,
+        "query_planner_mode": config.query_planner_mode.value,
+        "include_debug_trace": False,
         "top_k": DEFAULT_TOP_K,
         "use_cache": True,
         "seed_input": "",
@@ -1099,6 +1220,77 @@ def _seed_count_from_result(result: SkillResult[Any] | None) -> int:
     if not seeds:
         return 0
     return len(seeds)
+
+
+def _option_index(
+    options: Sequence[str],
+    value: Any,
+    *,
+    default_value: str | None = None,
+) -> int:
+    selected = str(value)
+    if selected in options:
+        return options.index(selected)
+    if default_value is not None and default_value in options:
+        return options.index(default_value)
+    return 0
+
+
+def _metadata_for_skill(
+    trace: Sequence[WorkflowTraceStep],
+    skill: str,
+) -> dict[str, Any]:
+    for step in trace:
+        if step.skill == skill:
+            return step.metadata
+    return {}
+
+
+def _planner_source_for_step(step: WorkflowTraceStep) -> str:
+    if step.skill == "query_planning":
+        return _metadata_text(step.metadata.get("source"))
+    return _metadata_text(step.metadata.get("planner_source"))
+
+
+def _planner_fallback_for_step(step: WorkflowTraceStep) -> str:
+    if step.skill == "query_planning":
+        fallback = step.metadata.get("fallback")
+    else:
+        fallback = step.metadata.get("planner_fallback")
+    if fallback is None:
+        return ""
+    return "yes" if bool(fallback) else "no"
+
+
+def _cache_summary_for_step(step: WorkflowTraceStep) -> str:
+    if step.skill != "arxiv_retrieval":
+        return ""
+    status = _metadata_text(step.metadata.get("cache_status"))
+    hit = step.metadata.get("cache_hit")
+    if hit is True:
+        return f"hit/{status}" if status else "hit"
+    if hit is False:
+        return f"miss/{status}" if status else "miss"
+    return status
+
+
+def _metadata_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value)
+
+
+def _metadata_int(value: Any, *, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _normalized_text(value: str) -> str:

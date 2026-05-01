@@ -290,6 +290,50 @@ followup = agent.run_followup_query(
 
 Follow-up queries search the local SQLite paper store first. Retrieval is only attempted when no stored paper matches and `fetch_if_empty=True`.
 
+## Hybrid Search Controls
+
+The recommendation workflow exposes the newer hybrid search surface through both the CLI and UI. Candidate pool size controls how many papers retrieval should gather before ranking; Top K remains the final recommendation count shown to the user.
+
+Search modes:
+
+- `broad` expands a topic into multiple planned query variants within the request budget.
+- `strict` keeps narrower compatibility behavior for exact-query demos.
+
+Planner modes:
+
+- `auto` uses deterministic planning in fake/local mode and can use the configured live provider when appropriate.
+- `deterministic` stays fully local.
+- `llm` requests live planner output and falls back to deterministic planning if the provider is unavailable or returns invalid output.
+
+Fixture-backed broad CLI demo:
+
+```bash
+daily-arxiv-agent demo \
+  --fixture tests/fixtures/arxiv_atom_response.xml \
+  --topic "agent briefing" \
+  --category cs.LG \
+  --search-mode broad \
+  --query-planner-mode deterministic \
+  --candidate-pool-size 20 \
+  --page-size 10 \
+  --max-requests 2 \
+  --top-k 2 \
+  --no-cache
+```
+
+Real API demo:
+
+```bash
+daily-arxiv-agent demo \
+  --topic "graph neural networks for agents" \
+  --category cs.LG \
+  --search-mode broad \
+  --candidate-pool-size 100 \
+  --top-k 5
+```
+
+Normal trace output is redacted: it shows planner source, fallback status, query-variant count, candidate count, cache status, and ranking mode without dumping raw query variants. Use `--debug-trace` only for local debugging because raw query variants and planner rationale may reveal research intent. Live LLM planner mode sends query text and filters to the configured provider; local SQLite caches can also contain topics, effective query keys, and trace metadata.
+
 ## Paper-Level Deep Explanation
 
 Unit 6 adds selected-paper explanation modes with cached full-text reuse, PDF-to-text preparation for one paper at a time, and abstract/metadata fallback:
@@ -324,13 +368,14 @@ explanation = (
 )
 ```
 
-Fixture-backed CLI demo:
+Strict fixture-backed CLI demo:
 
 ```bash
 daily-arxiv-agent demo \
   --fixture tests/fixtures/arxiv_atom_response.xml \
   --topic agents \
   --category cs.LG \
+  --search-mode strict \
   --top-k 2 \
   --no-cache
 ```
@@ -341,7 +386,8 @@ Real API demo (real arXiv + custom LLM API, no fixture):
 daily-arxiv-agent demo \
   --topic agents \
   --category cs.LG \
-  --max-results 10 \
+  --search-mode broad \
+  --candidate-pool-size 100 \
   --top-k 5 \
   --no-cache
 ```
@@ -356,6 +402,7 @@ Unit 7 adds a local Streamlit surface that reuses the same orchestrator methods 
 The page exposes:
 
 - topic, date, category, and seed-paper inputs for the recommendation workflow
+- broad/strict search mode, candidate pool size, retrieval budget, and query-planner mode controls
 - visible workflow trace rows with status, evidence labels, and fallback details
 - like/dislike refinement tied to the original recommendation run ID
 - follow-up filtering against the local SQLite store

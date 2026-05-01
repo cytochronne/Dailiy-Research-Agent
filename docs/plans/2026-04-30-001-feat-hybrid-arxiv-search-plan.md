@@ -352,7 +352,7 @@ flowchart TD
 **Verification:**
 - End-to-end recommendation and follow-up workflows remain inspectable and deterministic under fake providers.
 
-- [ ] **Unit 6: CLI, UI, and Documentation Surface**
+- [x] **Unit 6: CLI, UI, and Documentation Surface**
 
 **Goal:** Expose improved search controls and trace details to users without making the demo UI noisy.
 

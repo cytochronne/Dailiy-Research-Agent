@@ -9,7 +9,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-from daily_arxiv_agent.contracts import RetrievalQuery, SkillStatus
+from daily_arxiv_agent.config import AppConfig
+from daily_arxiv_agent.contracts import (
+    QueryPlannerMode,
+    RetrievalQuery,
+    SearchMode,
+    SkillStatus,
+)
 from daily_arxiv_agent.orchestrator import DailyArxivAgentOrchestrator
 from daily_arxiv_agent.skills.arxiv_retrieval import ArxivRetrievalSkill
 from daily_arxiv_agent.skills.followup import FollowupQuery
@@ -48,6 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    config = AppConfig.from_env()
     parser = argparse.ArgumentParser(
         prog="daily-arxiv-agent",
         description="Run fixture-backed Daily arXiv Agent workflows.",
@@ -57,14 +64,52 @@ def _build_parser() -> argparse.ArgumentParser:
     demo = subparsers.add_parser("demo", help="Run recommendation workflow end to end.")
     _add_common_filters(demo)
     demo.add_argument("--fixture", type=Path, help="arXiv Atom XML fixture path.")
-    demo.add_argument("--db-path", default="data/daily_arxiv.sqlite3")
+    demo.add_argument("--db-path", default=config.db_path)
     demo.add_argument("--top-k", type=int, default=5)
+    demo.add_argument(
+        "--candidate-pool-size",
+        type=int,
+        default=config.candidate_pool_size,
+        help=(
+            "Number of retrieved candidates to collect before ranking. "
+            "Top K remains the final recommendation count."
+        ),
+    )
+    demo.add_argument(
+        "--search-mode",
+        choices=[mode.value for mode in SearchMode],
+        default=config.search_mode.value,
+        help="Use broad multi-variant search or strict compatibility search.",
+    )
+    demo.add_argument(
+        "--query-planner-mode",
+        choices=[mode.value for mode in QueryPlannerMode],
+        default=config.query_planner_mode.value,
+        help="Requested query-planning strategy for search expansion.",
+    )
+    demo.add_argument(
+        "--page-size",
+        type=int,
+        default=config.arxiv_page_size,
+        help="Maximum papers requested per arXiv API page.",
+    )
+    demo.add_argument(
+        "--max-requests",
+        type=int,
+        default=config.arxiv_max_requests_per_search,
+        help="Maximum arXiv API requests per recommendation run.",
+    )
+    demo.add_argument(
+        "--debug-trace",
+        action="store_true",
+        help="Include raw query variants and planner rationale in trace metadata.",
+    )
     demo.add_argument("--no-cache", action="store_true")
 
     followup = subparsers.add_parser("followup", help="Run a local-first follow-up query.")
     _add_common_filters(followup)
     followup.add_argument("--fixture", type=Path, help="Optional arXiv Atom XML fixture path for empty local results.")
-    followup.add_argument("--db-path", default="data/daily_arxiv.sqlite3")
+    followup.add_argument("--db-path", default=config.db_path)
     followup.add_argument("--top-k", type=int, default=5)
     followup.add_argument("--local-only", action="store_true")
     return parser
@@ -75,7 +120,15 @@ def _add_common_filters(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--category")
     parser.add_argument("--start-date", type=_parse_date)
     parser.add_argument("--end-date", type=_parse_date)
-    parser.add_argument("--max-results", type=int, default=10)
+    parser.add_argument(
+        "--max-results",
+        type=int,
+        default=10,
+        help=(
+            "Compatibility result limit for strict/follow-up workflows. "
+            "For demo candidate gathering, prefer --candidate-pool-size."
+        ),
+    )
 
 
 def _run_demo(args: argparse.Namespace) -> Any:
@@ -86,11 +139,17 @@ def _run_demo(args: argparse.Namespace) -> Any:
         start_date=args.start_date,
         end_date=args.end_date,
         max_results=args.max_results,
+        search_mode=SearchMode(args.search_mode),
+        candidate_pool_size=args.candidate_pool_size,
+        page_size=args.page_size,
+        max_requests=args.max_requests,
+        query_planner_mode=QueryPlannerMode(args.query_planner_mode),
     )
     return orchestrator.run_recommendation(
         query,
         top_k=args.top_k,
         use_cache=not args.no_cache,
+        include_debug_trace=args.debug_trace,
     )
 
 

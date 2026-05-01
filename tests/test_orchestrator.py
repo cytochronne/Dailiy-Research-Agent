@@ -12,6 +12,7 @@ from daily_arxiv_agent.contracts import (
     QueryPlannerMode,
     Recommendation,
     RetrievalQuery,
+    SearchMode,
     SkillError,
     SkillResult,
     SkillStatus,
@@ -492,6 +493,16 @@ def test_cli_demo_runs_fixture_backed_workflow_end_to_end(
             "cs.LG",
             "--max-results",
             "5",
+            "--search-mode",
+            "broad",
+            "--query-planner-mode",
+            "deterministic",
+            "--candidate-pool-size",
+            "20",
+            "--page-size",
+            "10",
+            "--max-requests",
+            "2",
             "--top-k",
             "2",
             "--no-cache",
@@ -509,6 +520,11 @@ def test_cli_demo_runs_fixture_backed_workflow_end_to_end(
         "extraction",
         "briefing",
     ]
+    assert payload["data"]["query"]["search_mode"] == SearchMode.BROAD.value
+    assert payload["data"]["query"]["query_planner_mode"] == QueryPlannerMode.DETERMINISTIC.value
+    assert payload["data"]["query"]["candidate_pool_size"] == 20
+    assert payload["data"]["query"]["page_size"] == 10
+    assert payload["data"]["query"]["max_requests"] == 2
     assert len(payload["data"]["recommendations"]) == 2
 
 

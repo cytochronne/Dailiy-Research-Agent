@@ -8,8 +8,10 @@ from daily_arxiv_agent.contracts import (
     EvidenceSource,
     PaperMetadata,
     Provenance,
+    QueryPlannerMode,
     Recommendation,
     RetrievalQuery,
+    SearchMode,
     SkillError,
     SkillResult,
     SkillStatus,
@@ -24,6 +26,7 @@ import daily_arxiv_agent.ui.streamlit_app as ui_module
 from daily_arxiv_agent.ui.streamlit_app import (
     recommendation_empty_state_message,
     recommendation_rows,
+    recommendation_summary_metrics,
     result_notice,
     workflow_trace_rows,
 )
@@ -108,6 +111,7 @@ def test_workflow_trace_rows_render_evidence_and_fallback_details() -> None:
             fallback=True,
             error_code="ranking_fallback",
             error_message="Fallback ranking was used.",
+            metadata={"ranking_mode": "query_plan"},
         )
     ]
 
@@ -123,8 +127,57 @@ def test_workflow_trace_rows_render_evidence_and_fallback_details() -> None:
             "input": "topic='agents'",
             "output": "2 recommendation(s) ranked",
             "error": "ranking_fallback: Fallback ranking was used.",
+            "planner_source": "",
+            "planner_fallback": "",
+            "query_variants": "",
+            "candidates": "",
+            "cache": "",
+            "ranking_mode": "query_plan",
         }
     ]
+
+
+def test_workflow_trace_rows_surface_search_metadata_without_raw_queries() -> None:
+    trace = [
+        WorkflowTraceStep(
+            step=1,
+            skill="query_planning",
+            status=SkillStatus.SUCCESS,
+            input_summary="topic='agents'",
+            output_summary="2 query variant(s) planned",
+            evidence_source=EvidenceSource.METADATA,
+            metadata={
+                "source": "deterministic",
+                "fallback": False,
+                "query_variant_count": 2,
+            },
+        ),
+        WorkflowTraceStep(
+            step=2,
+            skill="arxiv_retrieval",
+            status=SkillStatus.SUCCESS,
+            input_summary="topic='agents'",
+            output_summary="12 paper(s) retrieved",
+            evidence_source=EvidenceSource.METADATA,
+            metadata={
+                "planner_source": "deterministic",
+                "planner_fallback": False,
+                "query_variant_count": 2,
+                "candidate_count": 12,
+                "cache_hit": False,
+                "cache_status": "complete",
+            },
+        ),
+    ]
+
+    rows = workflow_trace_rows(trace)
+
+    assert rows[0]["planner_source"] == "deterministic"
+    assert rows[0]["planner_fallback"] == "no"
+    assert rows[0]["query_variants"] == "2"
+    assert rows[1]["candidates"] == "12"
+    assert rows[1]["cache"] == "miss/complete"
+    assert "planner_rationale" not in rows[0]
 
 
 def test_empty_recommendation_state_is_clear() -> None:
@@ -138,6 +191,95 @@ def test_empty_recommendation_state_is_clear() -> None:
     message = recommendation_empty_state_message(result)
 
     assert message == "No papers matched the current retrieval and ranking filters."
+
+
+def test_recommendation_summary_metrics_show_search_surface() -> None:
+    workflow = RecommendationWorkflow(
+        run_id="run-search-surface-123",
+        topic="agent briefing",
+        query=RetrievalQuery(
+            topic="agent briefing",
+            search_mode=SearchMode.BROAD,
+            candidate_pool_size=50,
+        ),
+        papers=[make_paper("2604.00001", "Agent Briefings", "abstract")],
+        recommendations=[
+            make_recommendation("2604.00001", "Agent Briefings", 8.5),
+        ],
+        trace=[
+            WorkflowTraceStep(
+                step=1,
+                skill="query_planning",
+                status=SkillStatus.FALLBACK,
+                input_summary="topic='agent briefing'",
+                output_summary="2 query variant(s) planned",
+                evidence_source=EvidenceSource.METADATA,
+                metadata={"source": "deterministic", "fallback": True},
+            ),
+            WorkflowTraceStep(
+                step=2,
+                skill="arxiv_retrieval",
+                status=SkillStatus.SUCCESS,
+                input_summary="topic='agent briefing'",
+                output_summary="8 paper(s) retrieved",
+                evidence_source=EvidenceSource.METADATA,
+                metadata={
+                    "candidate_count": 8,
+                    "cache_hit": True,
+                    "cache_status": "complete",
+                },
+            ),
+        ],
+    )
+
+    metrics = recommendation_summary_metrics(workflow)
+
+    assert metrics["run_id"] == "run-search-s"
+    assert metrics["candidate_pool_size"] == 50
+    assert metrics["candidates_retrieved"] == 8
+    assert metrics["recommendations_shown"] == 1
+    assert metrics["planner_source"] == "deterministic"
+    assert metrics["planner_fallback"] == "yes"
+    assert metrics["cache_hit"] == "yes"
+    assert metrics["cache_status"] == "complete"
+
+
+def test_build_retrieval_query_uses_ui_search_controls() -> None:
+    state = {
+        "topic": "agent briefing",
+        "category": "cs.LG",
+        "start_date": date(2026, 4, 20),
+        "end_date": date(2026, 4, 21),
+        "max_results": 25,
+        "search_mode": SearchMode.BROAD.value,
+        "candidate_pool_size": 75,
+        "arxiv_page_size": 25,
+        "arxiv_max_requests": 3,
+        "query_planner_mode": QueryPlannerMode.DETERMINISTIC.value,
+    }
+
+    query = ui_module._build_retrieval_query(state)
+
+    assert query.search_mode == SearchMode.BROAD
+    assert query.candidate_pool_size == 75
+    assert query.effective_candidate_pool_size == 75
+    assert query.page_size == 25
+    assert query.max_requests == 3
+    assert query.query_planner_mode == QueryPlannerMode.DETERMINISTIC
+
+
+def test_option_index_falls_back_for_stale_session_values() -> None:
+    options = [SearchMode.STRICT.value, SearchMode.BROAD.value]
+
+    assert (
+        ui_module._option_index(
+            options,
+            "invalid",
+            default_value=SearchMode.BROAD.value,
+        )
+        == 1
+    )
+    assert ui_module._option_index(options, SearchMode.STRICT.value) == 0
 
 
 def test_fallback_notice_includes_error_message() -> None:

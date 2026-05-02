@@ -16,6 +16,7 @@ from daily_arxiv_agent.contracts import (
     EvidenceSource,
     ExplanationMode,
     PaperDeepExplanation,
+    PaperMetadata,
     Recommendation,
     SkillError,
     SkillResult,
@@ -33,6 +34,28 @@ class RecommendationEvaluation(BaseModel):
     precision_at_k: float = 0.0
     recall_at_k: float = 0.0
     mean_reciprocal_rank: float = 0.0
+    zero_data_reason: str | None = None
+
+
+class SearchQualityEvaluation(BaseModel):
+    """Offline search-quality metrics for candidate retrieval and Top-K ranking."""
+
+    expected_relevant_ids: list[str] = Field(default_factory=list)
+    candidate_paper_ids: list[str] = Field(default_factory=list)
+    candidate_count: int = 0
+    relevant_candidate_ids: list[str] = Field(default_factory=list)
+    missing_candidate_relevant_ids: list[str] = Field(default_factory=list)
+    relevant_candidate_coverage: float = 0.0
+    top_k_paper_ids: list[str] = Field(default_factory=list)
+    matched_top_k_ids: list[str] = Field(default_factory=list)
+    missing_top_k_relevant_ids: list[str] = Field(default_factory=list)
+    precision_at_k: float = 0.0
+    recall_at_k: float = 0.0
+    mean_reciprocal_rank: float = 0.0
+    rationale_covered_ids: list[str] = Field(default_factory=list)
+    missing_rationale_ids: list[str] = Field(default_factory=list)
+    rationale_coverage: float = 0.0
+    budget_exhausted: bool | None = None
     zero_data_reason: str | None = None
 
 
@@ -225,6 +248,108 @@ def evaluate_recommendation_fixture(
         )
     result.metadata["fixture_keys"] = sorted(fixture.keys())
     return result
+
+
+def evaluate_search_quality(
+    candidates: Sequence[PaperMetadata | Mapping[str, Any] | str],
+    recommendations: Sequence[Recommendation | Mapping[str, Any]],
+    expected_relevant_paper_ids: Sequence[str],
+    *,
+    k: int | None = None,
+    retrieval_metadata: Mapping[str, Any] | None = None,
+) -> SkillResult[SearchQualityEvaluation]:
+    """Evaluate offline search recall, Top-K quality, and rationale coverage."""
+
+    try:
+        expected_ids = _normalize_expected_ids(expected_relevant_paper_ids)
+        candidate_ids = _normalize_candidate_ids(candidates)
+        refs = _normalize_recommendations(recommendations)
+        limit = _normalize_k(k)
+    except ValueError as exc:
+        return _validation_error(str(exc))
+
+    expected_set = set(expected_ids)
+    candidate_id_set = set(candidate_ids)
+    relevant_candidate_ids = [
+        paper_id for paper_id in expected_ids if paper_id in candidate_id_set
+    ]
+    missing_candidate_ids = [
+        paper_id for paper_id in expected_ids if paper_id not in relevant_candidate_ids
+    ]
+
+    evaluated_refs = refs if limit is None else refs[:limit]
+    top_k_ids = [item.paper_id for item in evaluated_refs]
+    matched_top_k_ids = [
+        paper_id for paper_id in top_k_ids if paper_id in expected_set
+    ]
+    missing_top_k_ids = [
+        paper_id for paper_id in expected_ids if paper_id not in matched_top_k_ids
+    ]
+    first_relevant_position = next(
+        (
+            position
+            for position, paper_id in enumerate(top_k_ids, start=1)
+            if paper_id in expected_set
+        ),
+        None,
+    )
+    rationale_ids = _recommendation_ids_with_rationale(recommendations)
+    rationale_covered_ids = [
+        paper_id for paper_id in top_k_ids if paper_id in rationale_ids
+    ]
+    missing_rationale_ids = [
+        paper_id for paper_id in top_k_ids if paper_id not in rationale_ids
+    ]
+    zero_data_reason = (
+        "No candidates or recommendations were supplied for search-quality evaluation."
+        if not candidate_ids and not top_k_ids
+        else None
+    )
+
+    data = SearchQualityEvaluation(
+        expected_relevant_ids=expected_ids,
+        candidate_paper_ids=candidate_ids,
+        candidate_count=len(candidate_ids),
+        relevant_candidate_ids=relevant_candidate_ids,
+        missing_candidate_relevant_ids=missing_candidate_ids,
+        relevant_candidate_coverage=round(
+            len(relevant_candidate_ids) / len(expected_ids),
+            4,
+        ),
+        top_k_paper_ids=top_k_ids,
+        matched_top_k_ids=matched_top_k_ids,
+        missing_top_k_relevant_ids=missing_top_k_ids,
+        precision_at_k=round(
+            len(matched_top_k_ids) / len(top_k_ids) if top_k_ids else 0.0,
+            4,
+        ),
+        recall_at_k=round(len(matched_top_k_ids) / len(expected_ids), 4),
+        mean_reciprocal_rank=round(
+            1.0 / first_relevant_position if first_relevant_position else 0.0,
+            4,
+        ),
+        rationale_covered_ids=rationale_covered_ids,
+        missing_rationale_ids=missing_rationale_ids,
+        rationale_coverage=round(
+            len(rationale_covered_ids) / len(top_k_ids) if top_k_ids else 0.0,
+            4,
+        ),
+        budget_exhausted=_budget_exhausted_from_metadata(retrieval_metadata),
+        zero_data_reason=zero_data_reason,
+    )
+    return SkillResult[SearchQualityEvaluation](
+        status=SkillStatus.EMPTY if zero_data_reason else SkillStatus.SUCCESS,
+        data=data,
+        evidence_source=EvidenceSource.METADATA,
+        message=zero_data_reason or "Evaluated offline search quality.",
+        metadata={
+            "expected_count": len(expected_ids),
+            "candidate_count": data.candidate_count,
+            "top_k_count": len(top_k_ids),
+            "k": limit,
+            "budget_exhausted": data.budget_exhausted,
+        },
+    )
 
 
 def evaluate_feedback_movement(
@@ -434,6 +559,24 @@ def _normalize_recommendations(
     return sorted(refs, key=lambda item: item.rank)
 
 
+def _normalize_candidate_ids(
+    candidates: Sequence[PaperMetadata | Mapping[str, Any] | str],
+) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    for position, candidate in enumerate(candidates, start=1):
+        paper_id = _paper_id_from_candidate(candidate)
+        if not paper_id:
+            raise ValueError(
+                f"candidates[{position - 1}] must include a non-empty paper_id"
+            )
+        if paper_id in seen:
+            continue
+        ids.append(paper_id)
+        seen.add(paper_id)
+    return ids
+
+
 def _paper_id_from_recommendation(
     recommendation: Recommendation | Mapping[str, Any],
 ) -> str:
@@ -442,6 +585,21 @@ def _paper_id_from_recommendation(
     raw_id = recommendation.get("paper_id")
     if raw_id is None:
         paper = recommendation.get("paper")
+        if isinstance(paper, Mapping):
+            raw_id = paper.get("paper_id")
+        elif hasattr(paper, "paper_id"):
+            raw_id = getattr(paper, "paper_id")
+    return str(raw_id).strip() if raw_id is not None else ""
+
+
+def _paper_id_from_candidate(candidate: PaperMetadata | Mapping[str, Any] | str) -> str:
+    if isinstance(candidate, str):
+        return candidate.strip()
+    if isinstance(candidate, PaperMetadata):
+        return candidate.paper_id.strip()
+    raw_id = candidate.get("paper_id")
+    if raw_id is None:
+        paper = candidate.get("paper")
         if isinstance(paper, Mapping):
             raw_id = paper.get("paper_id")
         elif hasattr(paper, "paper_id"):
@@ -483,6 +641,46 @@ def _score_from_recommendation(
         return float(raw_score)
     except (TypeError, ValueError) as exc:
         raise ValueError("score must be numeric when supplied") from exc
+
+
+def _recommendation_ids_with_rationale(
+    recommendations: Sequence[Recommendation | Mapping[str, Any]],
+) -> set[str]:
+    ids: set[str] = set()
+    for recommendation in recommendations:
+        paper_id = _paper_id_from_recommendation(recommendation)
+        rationale = _rationale_from_recommendation(recommendation)
+        if paper_id and rationale:
+            ids.add(paper_id)
+    return ids
+
+
+def _rationale_from_recommendation(
+    recommendation: Recommendation | Mapping[str, Any],
+) -> str:
+    raw_rationale = (
+        recommendation.rationale
+        if isinstance(recommendation, Recommendation)
+        else recommendation.get("rationale")
+    )
+    return " ".join(str(raw_rationale).split()) if raw_rationale is not None else ""
+
+
+def _budget_exhausted_from_metadata(
+    retrieval_metadata: Mapping[str, Any] | None,
+) -> bool | None:
+    if retrieval_metadata is None or "budget_exhausted" not in retrieval_metadata:
+        return None
+    value = retrieval_metadata["budget_exhausted"]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return bool(value)
 
 
 def _normalize_k(value: int | None) -> int | None:

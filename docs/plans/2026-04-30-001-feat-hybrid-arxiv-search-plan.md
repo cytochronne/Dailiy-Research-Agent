@@ -396,7 +396,7 @@ flowchart TD
 **Verification:**
 - Users can run a broad search from CLI/UI and see how many candidates were retrieved versus how many recommendations were shown.
 
-- [ ] **Unit 7: Search Quality Fixtures and Evaluation Hooks**
+- [x] **Unit 7: Search Quality Fixtures and Evaluation Hooks**
 
 **Goal:** Add deterministic checks that prove the new search pipeline improves recall and ranking behavior for multi-keyword topics.
 

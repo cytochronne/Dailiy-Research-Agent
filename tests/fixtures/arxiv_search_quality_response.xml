@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/2604.20001v1</id>
+    <updated>2026-04-24T12:00:00Z</updated>
+    <published>2026-04-24T10:00:00Z</published>
+    <title>Multimodal LLM Agents for Robotic Manipulation</title>
+    <summary>We present multimodal LLM agents for robotic manipulation with vision-language planning and closed-loop control.</summary>
+    <author>
+      <name>Ada Lovelace</name>
+    </author>
+    <category term="cs.RO"/>
+    <category term="cs.AI"/>
+    <link href="http://arxiv.org/abs/2604.20001v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2604.20001v1" rel="related" type="application/pdf"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2604.20002v1</id>
+    <updated>2026-04-23T12:00:00Z</updated>
+    <published>2026-04-23T10:00:00Z</published>
+    <title>Embodied Language Models for Dexterous Manipulation</title>
+    <summary>Language model policies coordinate embodied control, tool use, and autonomous agent planning for manipulation tasks.</summary>
+    <author>
+      <name>Grace Hopper</name>
+    </author>
+    <category term="cs.RO"/>
+    <category term="cs.LG"/>
+    <link href="http://arxiv.org/abs/2604.20002v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2604.20002v1" rel="related" type="application/pdf"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2604.20003v1</id>
+    <updated>2026-04-22T12:00:00Z</updated>
+    <published>2026-04-22T10:00:00Z</published>
+    <title>Planning Agents for Robot Manipulation</title>
+    <summary>Autonomous agents decompose robot manipulation tasks into skill sequences using task feedback and symbolic planning.</summary>
+    <author>
+      <name>Katherine Johnson</name>
+    </author>
+    <category term="cs.RO"/>
+    <category term="cs.AI"/>
+    <link href="http://arxiv.org/abs/2604.20003v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2604.20003v1" rel="related" type="application/pdf"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2604.20004v1</id>
+    <updated>2026-04-25T12:00:00Z</updated>
+    <published>2026-04-25T10:00:00Z</published>
+    <title>Recent Benchmark Notes</title>
+    <summary>A short benchmark note about recently released datasets and simulator maintenance.</summary>
+    <author>
+      <name>Alan Turing</name>
+    </author>
+    <category term="cs.RO"/>
+    <link href="http://arxiv.org/abs/2604.20004v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2604.20004v1" rel="related" type="application/pdf"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2604.20005v1</id>
+    <updated>2026-04-21T12:00:00Z</updated>
+    <published>2026-04-21T10:00:00Z</published>
+    <title>Learning Theory Notes</title>
+    <summary>This category-matched note studies sample complexity and generalization bounds.</summary>
+    <author>
+      <name>Barbara Liskov</name>
+    </author>
+    <category term="cs.RO"/>
+    <category term="cs.LG"/>
+    <link href="http://arxiv.org/abs/2604.20005v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2604.20005v1" rel="related" type="application/pdf"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2604.20006v1</id>
+    <updated>2026-04-24T09:00:00Z</updated>
+    <published>2026-04-24T08:00:00Z</published>
+    <title>Register Allocation for Optimizing Compilers</title>
+    <summary>This unrelated systems paper studies compiler register pressure and graph coloring heuristics.</summary>
+    <author>
+      <name>Donald Knuth</name>
+    </author>
+    <category term="cs.PL"/>
+    <link href="http://arxiv.org/abs/2604.20006v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2604.20006v1" rel="related" type="application/pdf"/>
+  </entry>
+</feed>

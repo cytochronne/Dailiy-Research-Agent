@@ -19,6 +19,46 @@ class EvidenceSource(StrEnum):
     METADATA = "metadata"
     ABSTRACT = "abstract"
     FULL_TEXT = "full_text"
+    RANKING = "ranking"
+    RETRIEVAL_METADATA = "retrieval_metadata"
+    CANDIDATE_POOL = "candidate_pool"
+    MIXED = "mixed"
+
+
+class EvidenceSupportStatus(StrEnum):
+    """How strongly available evidence supports a briefing claim."""
+
+    SUPPORTED = "supported"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+    NOT_ASSESSED = "not_assessed"
+    INSUFFICIENT = "insufficient_evidence"
+
+
+class TrendAssessmentStatus(StrEnum):
+    """Candidate-pool trend assessment availability."""
+
+    AVAILABLE = "available"
+    LIMITED = "limited"
+    INSUFFICIENT_DATA = "insufficient_candidate_data"
+    NOT_ASSESSED = "not_assessed"
+
+
+class TrendSignalType(StrEnum):
+    """Kinds of candidate-pool signals used in a briefing overview."""
+
+    TOPIC = "topic"
+    HOTSPOT = "hotspot"
+    CATEGORY = "category"
+    EVIDENCE_COVERAGE = "evidence_coverage"
+
+
+class TrendSignalStrength(StrEnum):
+    """Conservative strength labels for candidate-pool signals."""
+
+    WEAK = "weak"
+    MODERATE = "moderate"
+    STRONG = "strong"
 
 
 class SkillStatus(StrEnum):
@@ -338,6 +378,103 @@ class FeedbackEvent(BaseModel):
         return value.astimezone(timezone.utc)
 
 
+class FieldEvidenceStatus(BaseModel):
+    """Evidence state for one briefing claim or abstention."""
+
+    status: EvidenceSupportStatus = EvidenceSupportStatus.NOT_ASSESSED
+    sources: list[EvidenceSource] = Field(default_factory=list)
+    note: str | None = None
+    abstention_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_support_or_abstention(self) -> "FieldEvidenceStatus":
+        if self.status in {
+            EvidenceSupportStatus.SUPPORTED,
+            EvidenceSupportStatus.PARTIAL,
+        } and not self.sources:
+            raise ValueError("supported briefing claims must include evidence sources")
+        if self.status in {
+            EvidenceSupportStatus.UNAVAILABLE,
+            EvidenceSupportStatus.INSUFFICIENT,
+        } and not (self.note or self.abstention_reason):
+            raise ValueError("abstentions must include a note or abstention reason")
+        return self
+
+
+class EvidenceBoundClaim(BaseModel):
+    """A paper-level claim with its support or abstention state."""
+
+    claim: str | None = None
+    evidence: FieldEvidenceStatus = Field(default_factory=FieldEvidenceStatus)
+
+
+class TrendSignal(BaseModel):
+    """One bounded trend or hotspot signal from the candidate pool."""
+
+    label: str
+    signal_type: TrendSignalType = TrendSignalType.TOPIC
+    strength: TrendSignalStrength = TrendSignalStrength.WEAK
+    support_count: int = Field(default=0, ge=0)
+    candidate_count: int | None = Field(default=None, ge=0)
+    top_k_count: int | None = Field(default=None, ge=0)
+    evidence_sources: list[EvidenceSource] = Field(default_factory=list)
+    summary: str | None = None
+    limitations: list[str] = Field(default_factory=list)
+    query_echo: bool = False
+
+
+class CandidatePoolTrendOverview(BaseModel):
+    """Trend and hotspot overview derived from broader candidate metadata."""
+
+    status: TrendAssessmentStatus = TrendAssessmentStatus.NOT_ASSESSED
+    summary: str | None = None
+    candidate_count: int = Field(default=0, ge=0)
+    abstract_count: int = Field(default=0, ge=0)
+    metadata_only_count: int = Field(default=0, ge=0)
+    top_k_count: int = Field(default=0, ge=0)
+    signals: list[TrendSignal] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    evidence_sources: list[EvidenceSource] = Field(default_factory=list)
+
+
+class TopKComparisonNote(BaseModel):
+    """Evidence-bounded comparison across one or more Top-K papers."""
+
+    dimension: str
+    note: str
+    paper_ids: list[str] = Field(default_factory=list)
+    ranks: list[int] = Field(default_factory=list)
+    evidence: FieldEvidenceStatus = Field(default_factory=FieldEvidenceStatus)
+
+    @field_validator("ranks")
+    @classmethod
+    def validate_ranks(cls, value: list[int]) -> list[int]:
+        if any(rank < 1 for rank in value):
+            raise ValueError("comparison ranks must be positive")
+        return value
+
+
+class ReadingPriority(BaseModel):
+    """Goal-aware reading recommendation for one ranked paper."""
+
+    priority: int = Field(ge=1)
+    reading_intent: str
+    paper_id: str
+    rank: int = Field(ge=1)
+    reason: str
+    evidence: FieldEvidenceStatus = Field(default_factory=FieldEvidenceStatus)
+
+
+class BriefingEvidenceBoundary(BaseModel):
+    """Evidence sources used, unavailable sources, and explicit abstentions."""
+
+    evidence_sources: list[EvidenceSource] = Field(default_factory=list)
+    unavailable_sources: list[EvidenceSource] = Field(default_factory=list)
+    full_text_used: bool = False
+    notes: list[str] = Field(default_factory=list)
+    abstentions: list[EvidenceBoundClaim] = Field(default_factory=list)
+
+
 class PaperBriefingItem(BaseModel):
     """Structured briefing fields extracted for one ranked paper."""
 
@@ -352,6 +489,12 @@ class PaperBriefingItem(BaseModel):
     evidence_source: EvidenceSource
     provenance: Provenance
     arxiv_url: HttpUrl
+    problem: EvidenceBoundClaim | None = None
+    approach: EvidenceBoundClaim | None = None
+    reading_guide: EvidenceBoundClaim | None = None
+    contribution_claims: list[EvidenceBoundClaim] = Field(default_factory=list)
+    method_claims: list[EvidenceBoundClaim] = Field(default_factory=list)
+    relevance_evidence: FieldEvidenceStatus | None = None
 
 
 class BriefingTableRow(BaseModel):
@@ -377,6 +520,14 @@ class DailyBriefing(BaseModel):
     items: list[PaperBriefingItem] = Field(default_factory=list)
     evidence_source: EvidenceSource | None = None
     provenance: list[Provenance] = Field(default_factory=list)
+    trend_overview: CandidatePoolTrendOverview = Field(
+        default_factory=CandidatePoolTrendOverview
+    )
+    top_k_comparisons: list[TopKComparisonNote] = Field(default_factory=list)
+    reading_priorities: list[ReadingPriority] = Field(default_factory=list)
+    evidence_boundary: BriefingEvidenceBoundary = Field(
+        default_factory=BriefingEvidenceBoundary
+    )
 
 
 class MethodExplanation(BaseModel):

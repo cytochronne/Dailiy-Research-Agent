@@ -5,16 +5,25 @@ from pydantic import ValidationError
 
 from daily_arxiv_agent.config import AppConfig
 from daily_arxiv_agent.contracts import (
+    BriefingEvidenceBoundary,
+    BriefingTableRow,
+    CandidatePoolTrendOverview,
+    DailyBriefing,
     EvidenceSource,
+    EvidenceBoundClaim,
+    EvidenceSupportStatus,
     ExplanationMode,
+    FieldEvidenceStatus,
     MethodExplanation,
     PaperDeepExplanation,
+    PaperBriefingItem,
     PaperMetadata,
     QueryPlan,
     QueryPlanVariant,
     QueryPlannerMode,
     QueryPlannerProvenance,
     RankingScoreBreakdown,
+    ReadingPriority,
     Recommendation,
     RetrievalBudget,
     RetrievalQuery,
@@ -24,6 +33,11 @@ from daily_arxiv_agent.contracts import (
     SkillError,
     SkillResult,
     SkillStatus,
+    TopKComparisonNote,
+    TrendAssessmentStatus,
+    TrendSignal,
+    TrendSignalStrength,
+    TrendSignalType,
 )
 
 
@@ -44,6 +58,39 @@ def make_paper() -> PaperMetadata:
         arxiv_url="https://arxiv.org/abs/2501.00001",
         pdf_url="https://arxiv.org/pdf/2501.00001",
         provenance=provenance,
+    )
+
+
+def make_briefing_item(
+    *,
+    evidence_source: EvidenceSource = EvidenceSource.ABSTRACT,
+) -> PaperBriefingItem:
+    paper = make_paper()
+    return PaperBriefingItem(
+        paper_id=paper.paper_id,
+        title=paper.title,
+        rank=1,
+        score=5.0,
+        summary="A concise briefing summary.",
+        contributions=["Introduces a testable agent architecture."],
+        methods=["Staged retrieval, ranking, and synthesis workflow."],
+        relevance_rationale="Matched explicit agent architecture terms.",
+        evidence_source=evidence_source,
+        provenance=paper.provenance,
+        arxiv_url=paper.arxiv_url,
+    )
+
+
+def make_briefing_table_row() -> BriefingTableRow:
+    paper = make_paper()
+    return BriefingTableRow(
+        rank=1,
+        paper_id=paper.paper_id,
+        title=paper.title,
+        score=5.0,
+        key_reason="Matched explicit agent architecture terms.",
+        evidence_source=EvidenceSource.ABSTRACT,
+        arxiv_url=paper.arxiv_url,
     )
 
 
@@ -225,6 +272,241 @@ def test_recommendation_can_expose_score_breakdown() -> None:
     assert recommendation.score_breakdown is not None
     assert recommendation.score_breakdown.total == 5.0
     assert recommendation.score_breakdown.signals == ["lexical", "phrase"]
+
+
+def test_minimal_daily_briefing_payloads_remain_valid() -> None:
+    paper = make_paper()
+    item = PaperBriefingItem(
+        paper_id=paper.paper_id,
+        title=paper.title,
+        rank=1,
+        score=5.0,
+        summary="A concise briefing summary.",
+        relevance_rationale="Matched explicit agent architecture terms.",
+        evidence_source=EvidenceSource.ABSTRACT,
+        provenance=paper.provenance,
+        arxiv_url=paper.arxiv_url,
+    )
+    briefing = DailyBriefing(
+        topic="agent architectures",
+        executive_summary="One top-ranked paper is available.",
+        summary_table=[make_briefing_table_row()],
+        highlighted_paper=item,
+        items=[item],
+        evidence_source=EvidenceSource.ABSTRACT,
+        provenance=[paper.provenance],
+    )
+
+    payload = briefing.model_dump(mode="json")
+
+    assert item.contributions == []
+    assert item.methods == []
+    assert item.problem is None
+    assert payload["executive_summary"] == "One top-ranked paper is available."
+    assert payload["trend_overview"]["status"] == TrendAssessmentStatus.NOT_ASSESSED
+    assert payload["top_k_comparisons"] == []
+    assert payload["reading_priorities"] == []
+    assert payload["evidence_boundary"]["full_text_used"] is False
+
+
+def test_enhanced_daily_briefing_sections_preserve_legacy_fields() -> None:
+    paper = make_paper()
+    item = make_briefing_item()
+    trend = CandidatePoolTrendOverview(
+        status=TrendAssessmentStatus.AVAILABLE,
+        summary="Robust agent workflows appear repeatedly in the candidate pool.",
+        candidate_count=12,
+        abstract_count=10,
+        metadata_only_count=2,
+        top_k_count=3,
+        signals=[
+            TrendSignal(
+                label="agent workflow",
+                signal_type=TrendSignalType.HOTSPOT,
+                strength=TrendSignalStrength.MODERATE,
+                support_count=5,
+                candidate_count=12,
+                top_k_count=2,
+                evidence_sources=[
+                    EvidenceSource.CANDIDATE_POOL,
+                    EvidenceSource.ABSTRACT,
+                ],
+                summary="Repeated across abstracts and titles.",
+            )
+        ],
+        evidence_sources=[EvidenceSource.CANDIDATE_POOL, EvidenceSource.ABSTRACT],
+    )
+    comparison = TopKComparisonNote(
+        dimension="workflow focus",
+        note="The top paper focuses on architecture, while rank 2 emphasizes evaluation.",
+        paper_ids=[paper.paper_id, "2501.00004"],
+        ranks=[1, 2],
+        evidence=FieldEvidenceStatus(
+            status=EvidenceSupportStatus.SUPPORTED,
+            sources=[EvidenceSource.ABSTRACT, EvidenceSource.RANKING],
+        ),
+    )
+    priority = ReadingPriority(
+        priority=1,
+        reading_intent="start with the implementation pattern",
+        paper_id=paper.paper_id,
+        rank=1,
+        reason="It has the strongest rank and directly addresses agent architecture.",
+        evidence=FieldEvidenceStatus(
+            status=EvidenceSupportStatus.SUPPORTED,
+            sources=[EvidenceSource.ABSTRACT, EvidenceSource.RANKING],
+        ),
+    )
+    boundary = BriefingEvidenceBoundary(
+        evidence_sources=[
+            EvidenceSource.METADATA,
+            EvidenceSource.ABSTRACT,
+            EvidenceSource.RANKING,
+            EvidenceSource.CANDIDATE_POOL,
+        ],
+        unavailable_sources=[EvidenceSource.FULL_TEXT],
+        notes=["No PDF or full-text evidence was used."],
+    )
+
+    briefing = DailyBriefing(
+        topic="agent architectures",
+        executive_summary="Top papers emphasize reusable agent workflows.",
+        summary_table=[make_briefing_table_row()],
+        highlighted_paper=item,
+        items=[item],
+        evidence_source=EvidenceSource.MIXED,
+        provenance=[paper.provenance],
+        trend_overview=trend,
+        top_k_comparisons=[comparison],
+        reading_priorities=[priority],
+        evidence_boundary=boundary,
+    )
+
+    assert briefing.executive_summary == "Top papers emphasize reusable agent workflows."
+    assert briefing.summary_table[0].paper_id == paper.paper_id
+    assert briefing.items[0].paper_id == paper.paper_id
+    assert briefing.provenance == [paper.provenance]
+    assert briefing.trend_overview.signals[0].signal_type == TrendSignalType.HOTSPOT
+    assert briefing.top_k_comparisons[0].evidence.sources == [
+        EvidenceSource.ABSTRACT,
+        EvidenceSource.RANKING,
+    ]
+    assert briefing.reading_priorities[0].reading_intent == (
+        "start with the implementation pattern"
+    )
+    assert briefing.evidence_boundary.unavailable_sources == [EvidenceSource.FULL_TEXT]
+
+
+def test_enhanced_paper_briefing_fields_serialize_evidence_and_abstentions() -> None:
+    item = make_briefing_item()
+    item.problem = EvidenceBoundClaim(
+        claim="Daily research workflows need transparent ranking evidence.",
+        evidence=FieldEvidenceStatus(
+            status=EvidenceSupportStatus.SUPPORTED,
+            sources=[EvidenceSource.ABSTRACT],
+        ),
+    )
+    item.approach = EvidenceBoundClaim(
+        claim="The paper frames retrieval, ranking, and synthesis as staged skills.",
+        evidence=FieldEvidenceStatus(
+            status=EvidenceSupportStatus.SUPPORTED,
+            sources=[EvidenceSource.ABSTRACT, EvidenceSource.METADATA],
+        ),
+    )
+    item.reading_guide = EvidenceBoundClaim(
+        claim="Read first for the agent boundary design, then inspect ranking details.",
+        evidence=FieldEvidenceStatus(
+            status=EvidenceSupportStatus.PARTIAL,
+            sources=[EvidenceSource.ABSTRACT, EvidenceSource.RANKING],
+            note="Ranking context supports the reading order.",
+        ),
+    )
+    item.method_claims = [
+        EvidenceBoundClaim(
+            claim=None,
+            evidence=FieldEvidenceStatus(
+                status=EvidenceSupportStatus.UNAVAILABLE,
+                abstention_reason="The abstract does not expose enough method detail.",
+            ),
+        )
+    ]
+    item.contribution_claims = [
+        EvidenceBoundClaim(
+            claim=None,
+            evidence=FieldEvidenceStatus(
+                status=EvidenceSupportStatus.UNAVAILABLE,
+                abstention_reason="Contribution claims require stronger abstract support.",
+            ),
+        )
+    ]
+
+    payload = item.model_dump(mode="json")
+
+    assert payload["problem"]["claim"] == (
+        "Daily research workflows need transparent ranking evidence."
+    )
+    assert payload["approach"]["evidence"]["sources"] == ["abstract", "metadata"]
+    assert payload["reading_guide"]["evidence"]["status"] == "partial"
+    assert payload["method_claims"][0]["claim"] is None
+    assert payload["method_claims"][0]["evidence"]["abstention_reason"] == (
+        "The abstract does not expose enough method detail."
+    )
+    assert payload["contribution_claims"][0]["evidence"]["status"] == "unavailable"
+
+
+def test_field_evidence_requires_sources_or_explicit_abstention() -> None:
+    with pytest.raises(ValidationError):
+        FieldEvidenceStatus(status=EvidenceSupportStatus.SUPPORTED)
+
+    with pytest.raises(ValidationError):
+        FieldEvidenceStatus(status=EvidenceSupportStatus.UNAVAILABLE)
+
+    status = FieldEvidenceStatus(
+        status=EvidenceSupportStatus.INSUFFICIENT,
+        abstention_reason="Only metadata is available.",
+    )
+
+    assert status.abstention_reason == "Only metadata is available."
+
+
+def test_top_k_comparison_rejects_invalid_ranks() -> None:
+    with pytest.raises(ValidationError):
+        TopKComparisonNote(
+            dimension="workflow focus",
+            note="Invalid rank example.",
+            ranks=[0],
+        )
+
+
+def test_trend_overview_can_represent_insufficient_candidate_data() -> None:
+    briefing = DailyBriefing(
+        topic="agent architectures",
+        executive_summary="Trend analysis was not available for this run.",
+        trend_overview=CandidatePoolTrendOverview(
+            status=TrendAssessmentStatus.INSUFFICIENT_DATA,
+            candidate_count=2,
+            abstract_count=1,
+            metadata_only_count=1,
+            top_k_count=2,
+            limitations=["Candidate pool is too small for broader trend claims."],
+            evidence_sources=[EvidenceSource.METADATA, EvidenceSource.CANDIDATE_POOL],
+        ),
+    )
+
+    assert briefing.trend_overview.status == TrendAssessmentStatus.INSUFFICIENT_DATA
+    assert briefing.trend_overview.signals == []
+    assert briefing.trend_overview.limitations == [
+        "Candidate pool is too small for broader trend claims."
+    ]
+
+
+def test_metadata_only_paper_brief_can_omit_richer_claims() -> None:
+    item = make_briefing_item(evidence_source=EvidenceSource.METADATA)
+
+    assert item.problem is None
+    assert item.approach is None
+    assert item.reading_guide is None
+    assert item.relevance_evidence is None
 
 
 def test_deep_explanation_contract_supports_mode_specific_sections() -> None:

@@ -115,7 +115,7 @@ flowchart TD
 
 ## Implementation Units
 
-- [ ] **Unit 1: Enhanced Briefing Contracts**
+- [x] **Unit 1: Enhanced Briefing Contracts**
 
 **Goal:** Add the structured output surface needed for richer paper briefs, trend/hotspot overview, comparisons, reading priorities, and evidence boundary while keeping existing briefing fields compatible.
 

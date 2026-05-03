@@ -6,16 +6,24 @@ import re
 from typing import Any, Sequence
 
 from daily_arxiv_agent.contracts import (
+    BriefingEvidenceBoundary,
+    CandidatePoolTrendOverview,
+    EvidenceBoundClaim,
     EvidenceSource,
+    EvidenceSupportStatus,
     ExperimentExplanation,
     ExplanationMode,
+    FieldEvidenceStatus,
     LimitationsExplanation,
     MethodExplanation,
     PaperBriefingItem,
     PaperDeepExplanation,
     PaperMetadata,
+    ReadingPriority,
     Recommendation,
     RetrievalQuery,
+    TopKComparisonNote,
+    TrendAssessmentStatus,
 )
 
 
@@ -42,8 +50,61 @@ class FakeLLMProvider:
 
         if paper.abstract:
             summary = _first_sentence(paper.abstract)
-            contributions = [_contribution_from_text(paper.abstract, topic)]
+            contributions = _contributions_from_text(paper.abstract, topic)
             methods = _methods_from_text(paper.abstract)
+            problem = _abstract_claim(
+                _sentence_with_keywords(
+                    paper.abstract,
+                    "problem",
+                    "challenge",
+                    "need",
+                    "requires",
+                    "study",
+                    "studies",
+                    "address",
+                    "addresses",
+                ),
+                unavailable_reason="The abstract does not state a problem framing.",
+            )
+            approach = _abstract_claim(
+                _sentence_with_keywords(
+                    paper.abstract,
+                    "approach",
+                    "method",
+                    "framework",
+                    "workflow",
+                    "model",
+                    "propose",
+                    "proposes",
+                    "present",
+                    "presents",
+                    "introduce",
+                    "introduces",
+                    "develop",
+                    "develops",
+                    "use",
+                    "uses",
+                    "using",
+                    "via",
+                ),
+                unavailable_reason=(
+                    "The abstract does not expose an approach or method claim."
+                ),
+            )
+            contribution_claims = _claims_from_items(
+                contributions,
+                sources=[EvidenceSource.ABSTRACT],
+                unavailable_reason=(
+                    "The abstract does not provide explicit contribution evidence."
+                ),
+            )
+            method_claims = _claims_from_items(
+                methods,
+                sources=[EvidenceSource.ABSTRACT],
+                unavailable_reason=(
+                    "The abstract does not provide explicit method evidence."
+                ),
+            )
         else:
             summary = (
                 f"Metadata only: '{paper.title}' has no abstract available, so the "
@@ -54,6 +115,20 @@ class FakeLLMProvider:
                 "claims are unavailable."
             ]
             methods = []
+            problem = _unavailable_claim(
+                "No abstract is available to support a problem claim."
+            )
+            approach = _unavailable_claim(
+                "No abstract is available to support an approach claim."
+            )
+            contribution_claims = [
+                _unavailable_claim(
+                    "No abstract is available to support contribution claims."
+                )
+            ]
+            method_claims = [
+                _unavailable_claim("No abstract is available to support method claims.")
+            ]
 
         return PaperBriefingItem(
             paper_id=paper.paper_id,
@@ -67,6 +142,30 @@ class FakeLLMProvider:
             evidence_source=evidence_source,
             provenance=paper.provenance,
             arxiv_url=paper.arxiv_url,
+            problem=problem,
+            approach=approach,
+            reading_guide=_reading_guide_claim(
+                rank=rank,
+                topic=topic,
+                rationale=rationale,
+                has_abstract=bool(paper.abstract),
+            ),
+            contribution_claims=contribution_claims,
+            method_claims=method_claims,
+            relevance_evidence=FieldEvidenceStatus(
+                status=(
+                    EvidenceSupportStatus.SUPPORTED
+                    if paper.abstract
+                    else EvidenceSupportStatus.PARTIAL
+                ),
+                sources=_ordered_sources([EvidenceSource.RANKING, evidence_source]),
+                note=(
+                    "Relevance is supported by ranking rationale and abstract evidence."
+                    if paper.abstract
+                    else "Relevance is evidence-limited because only metadata and "
+                    "ranking rationale are available."
+                ),
+            ),
         )
 
     def summarize_briefing(
@@ -74,14 +173,35 @@ class FakeLLMProvider:
         *,
         topic: str,
         items: Sequence[PaperBriefingItem],
+        trend_overview: CandidatePoolTrendOverview | None = None,
+        top_k_comparisons: Sequence[TopKComparisonNote] = (),
+        reading_priorities: Sequence[ReadingPriority] = (),
+        evidence_boundary: BriefingEvidenceBoundary | None = None,
     ) -> str:
         if not items:
             return f"No ranked papers were available for '{topic}'."
         leader = items[0]
+        trend_status = (
+            trend_overview.status.value
+            if trend_overview is not None
+            else TrendAssessmentStatus.NOT_ASSESSED.value
+        )
+        trend_count = len(trend_overview.signals) if trend_overview else 0
+        priority_note = (
+            reading_priorities[0].reading_intent
+            if reading_priorities
+            else "start with the highest ranked paper"
+        )
+        boundary_note = (
+            "full text was not used"
+            if evidence_boundary is not None and not evidence_boundary.full_text_used
+            else "available structured evidence was used"
+        )
         return (
-            f"{len(items)} ranked paper(s) were reviewed for '{topic}'. "
-            f"The top paper is '{leader.title}' with evidence from "
-            f"{leader.evidence_source.value}."
+            f"{len(items)} Top-K ranked paper(s) were reviewed for '{topic}'. "
+            f"Top-K reading guidance starts with '{leader.title}' because "
+            f"{priority_note}. Candidate-pool trend context is {trend_status} "
+            f"with {trend_count} bounded signal(s); {boundary_note}."
         )
 
     def explain_paper(
@@ -281,16 +401,35 @@ def _dedupe_list(values: Sequence[str]) -> list[str]:
     return items
 
 
-def _contribution_from_text(text: str, topic: str) -> str:
+def _contributions_from_text(text: str, topic: str) -> list[str]:
+    sentence = _sentence_with_keywords(
+        text,
+        "contribution",
+        "contributes",
+        "propose",
+        "proposes",
+        "present",
+        "presents",
+        "introduce",
+        "introduces",
+        "show",
+        "shows",
+        "demonstrate",
+        "demonstrates",
+    )
+    if not sentence:
+        return []
     if topic:
-        return f"Connects the paper's abstract evidence to the requested topic: {topic}."
-    return f"Summarizes abstract evidence: {_first_sentence(text)}"
+        return [f"Abstract-backed contribution for '{topic}': {sentence}"]
+    return [f"Abstract-backed contribution: {sentence}"]
 
 
 def _methods_from_text(text: str) -> list[str]:
     method_terms = [
-        "agent",
         "workflow",
+        "framework",
+        "approach",
+        "method",
         "ranking",
         "recommendation",
         "retrieval",
@@ -300,8 +439,125 @@ def _methods_from_text(text: str) -> list[str]:
     lower_text = text.lower()
     matched = [term for term in method_terms if term in lower_text]
     if not matched:
-        return ["Method details are only available at abstract level."]
+        return []
     return [f"Abstract mentions {term}." for term in matched[:3]]
+
+
+def _abstract_claim(
+    claim: str,
+    *,
+    unavailable_reason: str,
+) -> EvidenceBoundClaim:
+    if claim:
+        return EvidenceBoundClaim(
+            claim=claim,
+            evidence=FieldEvidenceStatus(
+                status=EvidenceSupportStatus.SUPPORTED,
+                sources=[EvidenceSource.ABSTRACT],
+            ),
+        )
+    return _unavailable_claim(unavailable_reason)
+
+
+def _reading_guide_claim(
+    *,
+    rank: int,
+    topic: str,
+    rationale: str,
+    has_abstract: bool,
+) -> EvidenceBoundClaim:
+    if has_abstract:
+        return EvidenceBoundClaim(
+            claim=(
+                f"Read rank {rank} for abstract-backed evidence on '{topic}', "
+                f"then compare it with the ranking rationale: {rationale}"
+            ),
+            evidence=FieldEvidenceStatus(
+                status=EvidenceSupportStatus.PARTIAL,
+                sources=_ordered_sources([EvidenceSource.ABSTRACT, EvidenceSource.RANKING]),
+                note="Reading guidance combines abstract evidence with ranking context.",
+            ),
+        )
+    return EvidenceBoundClaim(
+        claim=(
+            f"Treat rank {rank} as a metadata-only lead for '{topic}'; verify the "
+            "abstract or full text before drawing technical conclusions."
+        ),
+        evidence=FieldEvidenceStatus(
+            status=EvidenceSupportStatus.PARTIAL,
+            sources=_ordered_sources([EvidenceSource.METADATA, EvidenceSource.RANKING]),
+            note="Reading guidance is limited to metadata and ranking context.",
+        ),
+    )
+
+
+def _claims_from_items(
+    claims: Sequence[str],
+    *,
+    sources: list[EvidenceSource],
+    unavailable_reason: str,
+) -> list[EvidenceBoundClaim]:
+    supported_claims = [
+        claim for claim in claims if claim.strip() and not _looks_like_abstention(claim)
+    ]
+    if supported_claims and sources:
+        return [
+            EvidenceBoundClaim(
+                claim=claim,
+                evidence=FieldEvidenceStatus(
+                    status=EvidenceSupportStatus.SUPPORTED,
+                    sources=sources,
+                ),
+            )
+            for claim in supported_claims
+        ]
+    return [_unavailable_claim(unavailable_reason)]
+
+
+def _unavailable_claim(reason: str) -> EvidenceBoundClaim:
+    return EvidenceBoundClaim(
+        claim=None,
+        evidence=FieldEvidenceStatus(
+            status=EvidenceSupportStatus.UNAVAILABLE,
+            abstention_reason=reason,
+        ),
+    )
+
+
+def _looks_like_abstention(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "unavailable",
+            "not available",
+            "not found",
+            "no abstract",
+            "no explicit",
+            "metadata only",
+            "metadata-only",
+            "claims are unavailable",
+        )
+    )
+
+
+def _ordered_sources(sources: Sequence[EvidenceSource]) -> list[EvidenceSource]:
+    order = {
+        EvidenceSource.METADATA: 0,
+        EvidenceSource.ABSTRACT: 1,
+        EvidenceSource.RANKING: 2,
+        EvidenceSource.RETRIEVAL_METADATA: 3,
+        EvidenceSource.CANDIDATE_POOL: 4,
+        EvidenceSource.FULL_TEXT: 5,
+        EvidenceSource.MIXED: 6,
+    }
+    seen: set[EvidenceSource] = set()
+    unique: list[EvidenceSource] = []
+    for source in sorted(sources, key=lambda source: order[source]):
+        if source not in seen:
+            unique.append(source)
+            seen.add(source)
+    return unique
 
 
 def _parse_labeled_sections(text: str) -> dict[str, str]:

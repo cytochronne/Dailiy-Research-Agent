@@ -2,6 +2,7 @@ from datetime import date
 
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
+    EvidenceSupportStatus,
     PaperMetadata,
     Provenance,
     Recommendation,
@@ -11,7 +12,13 @@ from daily_arxiv_agent.llm.fake import FakeLLMProvider
 from daily_arxiv_agent.skills.extraction import PaperExtractionSkill
 
 
-def make_recommendation(abstract: str | None = "We propose an agent workflow for daily research briefings.") -> Recommendation:
+def make_recommendation(
+    abstract: str | None = (
+        "Daily research readers need transparent triage for overloaded arXiv feeds. "
+        "We propose an agent workflow that retrieves, ranks, and synthesizes daily "
+        "research briefings. The workflow contributes evidence-bounded reading guides."
+    ),
+) -> Recommendation:
     paper = PaperMetadata(
         paper_id="2604.00001",
         title="Explainable Agents for Daily Research Briefings",
@@ -60,6 +67,22 @@ def test_fake_llm_extraction_returns_expected_structure() -> None:
     assert item.methods
     assert "agent" in item.relevance_rationale.lower()
     assert item.evidence_source == EvidenceSource.ABSTRACT
+    assert item.problem is not None
+    assert item.problem.claim is not None
+    assert item.problem.evidence.status == EvidenceSupportStatus.SUPPORTED
+    assert item.approach is not None
+    assert item.approach.claim is not None
+    assert item.contribution_claims
+    assert item.contribution_claims[0].evidence.sources == [EvidenceSource.ABSTRACT]
+    assert item.method_claims
+    assert item.method_claims[0].evidence.sources == [EvidenceSource.ABSTRACT]
+    assert item.reading_guide is not None
+    assert item.reading_guide.evidence.status == EvidenceSupportStatus.PARTIAL
+    assert item.relevance_evidence is not None
+    assert item.relevance_evidence.sources == [
+        EvidenceSource.ABSTRACT,
+        EvidenceSource.RANKING,
+    ]
     assert str(item.arxiv_url) == "https://arxiv.org/abs/2604.00001"
 
 
@@ -75,6 +98,42 @@ def test_missing_abstract_labels_metadata_and_avoids_fabricated_methods() -> Non
     assert item.evidence_source == EvidenceSource.METADATA
     assert item.methods == []
     assert "metadata only" in item.summary.lower()
+    assert item.problem is not None
+    assert item.problem.claim is None
+    assert item.problem.evidence.status == EvidenceSupportStatus.UNAVAILABLE
+    assert item.approach is not None
+    assert item.approach.claim is None
+    assert item.contribution_claims[0].evidence.status == (
+        EvidenceSupportStatus.UNAVAILABLE
+    )
+    assert item.method_claims[0].evidence.status == EvidenceSupportStatus.UNAVAILABLE
+    assert item.reading_guide is not None
+    assert item.reading_guide.evidence.status == EvidenceSupportStatus.PARTIAL
+
+
+def test_vague_abstract_abstains_from_unsupported_methods_and_contributions() -> None:
+    result = PaperExtractionSkill(provider=FakeLLMProvider()).extract(
+        make_recommendation(
+            abstract=(
+                "This paper studies efficient reinforcement learning for agents. "
+                "It reports observations relevant to automated research assistants."
+            )
+        ),
+        topic="agent briefing",
+    )
+
+    item = result.data
+    assert result.status == SkillStatus.SUCCESS
+    assert item is not None
+    assert item.evidence_source == EvidenceSource.ABSTRACT
+    assert item.relevance_evidence is not None
+    assert item.relevance_evidence.status == EvidenceSupportStatus.SUPPORTED
+    assert item.contributions == []
+    assert item.methods == []
+    assert item.contribution_claims[0].evidence.status == (
+        EvidenceSupportStatus.UNAVAILABLE
+    )
+    assert item.method_claims[0].evidence.status == EvidenceSupportStatus.UNAVAILABLE
 
 
 def test_llm_adapter_failure_returns_fallback_extraction() -> None:
@@ -88,3 +147,10 @@ def test_llm_adapter_failure_returns_fallback_extraction() -> None:
     assert result.error.code == "llm_extraction_failed"
     assert result.data is not None
     assert result.data.evidence_source == EvidenceSource.METADATA
+    assert result.data.problem is not None
+    assert result.data.problem.evidence.status == EvidenceSupportStatus.UNAVAILABLE
+    assert result.data.reading_guide is not None
+    assert result.data.reading_guide.evidence.status == EvidenceSupportStatus.PARTIAL
+    assert result.data.method_claims[0].evidence.status == (
+        EvidenceSupportStatus.UNAVAILABLE
+    )

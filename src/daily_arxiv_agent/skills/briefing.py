@@ -14,17 +14,22 @@ from daily_arxiv_agent.contracts import (
     BriefingTableRow,
     CandidatePoolTrendOverview,
     DailyBriefing,
+    EvidenceBoundClaim,
     EvidenceSource,
+    EvidenceSupportStatus,
+    FieldEvidenceStatus,
     PaperBriefingItem,
     PaperMetadata,
     Provenance,
     QueryPlan,
+    ReadingPriority,
     RetrievalQuery,
     RetrievalSourceMetadata,
     Recommendation,
     SkillError,
     SkillResult,
     SkillStatus,
+    TopKComparisonNote,
     TrendAssessmentStatus,
     TrendSignal,
     TrendSignalStrength,
@@ -200,25 +205,48 @@ class DailyBriefingSkill:
             if result.status in {SkillStatus.FALLBACK, SkillStatus.ERROR}
             and result.error is not None
         ]
+        briefing_evidence_source = _briefing_evidence_source(
+            evidence_source,
+            trend_overview=trend_overview,
+        )
+        top_k_comparisons = _top_k_comparisons(
+            extracted_items,
+            trend_overview=trend_overview,
+        )
+        reading_priorities = _reading_priorities(extracted_items)
+        evidence_boundary = _evidence_boundary(
+            evidence_source=briefing_evidence_source,
+            trend_overview=trend_overview,
+            items=extracted_items,
+        )
 
         try:
             executive_summary = self.provider.summarize_briefing(
                 topic=topic,
                 items=extracted_items,
+                trend_overview=trend_overview,
+                top_k_comparisons=top_k_comparisons,
+                reading_priorities=reading_priorities,
+                evidence_boundary=evidence_boundary,
             )
         except Exception as exc:
-            briefing_evidence_source = _briefing_evidence_source(
-                evidence_source,
-                trend_overview=trend_overview,
-            )
             briefing = _briefing(
                 topic=topic,
-                executive_summary=_fallback_summary(topic, extracted_items),
+                executive_summary=_fallback_summary(
+                    topic,
+                    extracted_items,
+                    trend_overview=trend_overview,
+                    top_k_comparisons=top_k_comparisons,
+                    reading_priorities=reading_priorities,
+                ),
                 table=table,
                 items=extracted_items,
                 evidence_source=briefing_evidence_source,
                 provenance=provenance,
                 trend_overview=trend_overview,
+                top_k_comparisons=top_k_comparisons,
+                reading_priorities=reading_priorities,
+                evidence_boundary=evidence_boundary,
             )
             return SkillResult[DailyBriefing](
                 status=SkillStatus.FALLBACK,
@@ -237,10 +265,6 @@ class DailyBriefingSkill:
                 },
             )
 
-        briefing_evidence_source = _briefing_evidence_source(
-            evidence_source,
-            trend_overview=trend_overview,
-        )
         briefing = _briefing(
             topic=topic,
             executive_summary=executive_summary,
@@ -249,6 +273,9 @@ class DailyBriefingSkill:
             evidence_source=briefing_evidence_source,
             provenance=provenance,
             trend_overview=trend_overview,
+            top_k_comparisons=top_k_comparisons,
+            reading_priorities=reading_priorities,
+            evidence_boundary=evidence_boundary,
         )
         if extraction_errors:
             codes = ", ".join(sorted({error.code for error in extraction_errors}))
@@ -290,7 +317,20 @@ def _briefing(
     evidence_source: EvidenceSource,
     provenance: list[Provenance],
     trend_overview: CandidatePoolTrendOverview,
+    top_k_comparisons: list[TopKComparisonNote] | None = None,
+    reading_priorities: list[ReadingPriority] | None = None,
+    evidence_boundary: BriefingEvidenceBoundary | None = None,
 ) -> DailyBriefing:
+    resolved_comparisons = top_k_comparisons or _top_k_comparisons(
+        items,
+        trend_overview=trend_overview,
+    )
+    resolved_priorities = reading_priorities or _reading_priorities(items)
+    resolved_boundary = evidence_boundary or _evidence_boundary(
+        evidence_source=evidence_source,
+        trend_overview=trend_overview,
+        items=items,
+    )
     return DailyBriefing(
         topic=topic,
         executive_summary=executive_summary,
@@ -300,10 +340,9 @@ def _briefing(
         evidence_source=evidence_source,
         provenance=provenance,
         trend_overview=trend_overview,
-        evidence_boundary=_evidence_boundary(
-            evidence_source=evidence_source,
-            trend_overview=trend_overview,
-        ),
+        top_k_comparisons=resolved_comparisons,
+        reading_priorities=resolved_priorities,
+        evidence_boundary=resolved_boundary,
     )
 
 
@@ -325,11 +364,184 @@ def _combined_evidence(items: Sequence[PaperBriefingItem]) -> EvidenceSource:
     return EvidenceSource.METADATA
 
 
-def _fallback_summary(topic: str, items: Sequence[PaperBriefingItem]) -> str:
+def _fallback_summary(
+    topic: str,
+    items: Sequence[PaperBriefingItem],
+    *,
+    trend_overview: CandidatePoolTrendOverview,
+    top_k_comparisons: Sequence[TopKComparisonNote],
+    reading_priorities: Sequence[ReadingPriority],
+) -> str:
     return (
         f"Deterministic fallback briefing for '{topic}' includes {len(items)} "
-        "ranked paper(s)."
+        f"Top-K paper(s), {len(top_k_comparisons)} comparison note(s), "
+        f"and {len(reading_priorities)} reading priority item(s). "
+        f"Candidate-pool trend status: {trend_overview.status.value}."
     )
+
+
+def _top_k_comparisons(
+    items: Sequence[PaperBriefingItem],
+    *,
+    trend_overview: CandidatePoolTrendOverview,
+) -> list[TopKComparisonNote]:
+    if not items:
+        return []
+
+    notes: list[TopKComparisonNote] = []
+    top_items = sorted(items, key=lambda item: item.rank)[:3]
+    item_sources = _ordered_sources(
+        [EvidenceSource.RANKING, *(item.evidence_source for item in top_items)]
+    )
+    if len(top_items) == 1:
+        item = top_items[0]
+        notes.append(
+            TopKComparisonNote(
+                dimension="ranking context",
+                note=(
+                    f"Rank {item.rank} is '{item.title}' with score "
+                    f"{item.score:.3f}; no second Top-K paper was available for "
+                    "direct comparison."
+                ),
+                paper_ids=[item.paper_id],
+                ranks=[item.rank],
+                evidence=FieldEvidenceStatus(
+                    status=EvidenceSupportStatus.PARTIAL,
+                    sources=item_sources,
+                    note="Single-paper context is ranking guidance, not a cross-paper claim.",
+                ),
+            )
+        )
+    else:
+        leader = top_items[0]
+        challenger = top_items[1]
+        notes.append(
+            TopKComparisonNote(
+                dimension="ranking context",
+                note=(
+                    f"Rank {leader.rank} '{leader.title}' leads rank "
+                    f"{challenger.rank} '{challenger.title}' by "
+                    f"{leader.score - challenger.score:.3f} score point(s), based on "
+                    "ranking scores and extracted evidence fields."
+                ),
+                paper_ids=[leader.paper_id, challenger.paper_id],
+                ranks=[leader.rank, challenger.rank],
+                evidence=FieldEvidenceStatus(
+                    status=EvidenceSupportStatus.SUPPORTED,
+                    sources=item_sources,
+                ),
+            )
+        )
+
+    abstract_count = sum(
+        1 for item in items if item.evidence_source == EvidenceSource.ABSTRACT
+    )
+    metadata_count = len(items) - abstract_count
+    if metadata_count or abstract_count != len(items):
+        notes.append(
+            TopKComparisonNote(
+                dimension="evidence coverage",
+                note=(
+                    f"{abstract_count} Top-K paper(s) have abstract-backed briefs and "
+                    f"{metadata_count} are metadata-limited; compare technical claims "
+                    "only where abstract evidence is present."
+                ),
+                paper_ids=[item.paper_id for item in top_items],
+                ranks=[item.rank for item in top_items],
+                evidence=FieldEvidenceStatus(
+                    status=EvidenceSupportStatus.SUPPORTED,
+                    sources=_ordered_sources(
+                        [
+                            EvidenceSource.METADATA,
+                            EvidenceSource.ABSTRACT,
+                            EvidenceSource.RANKING,
+                        ]
+                    ),
+                ),
+            )
+        )
+
+    trend_signals = [
+        signal
+        for signal in trend_overview.signals
+        if signal.top_k_count and signal.top_k_count > 0
+    ]
+    if trend_signals:
+        signal_labels = ", ".join(signal.label for signal in trend_signals[:3])
+        notes.append(
+            TopKComparisonNote(
+                dimension="candidate-pool context",
+                note=(
+                    "Top-K papers overlap with bounded candidate-pool signal(s): "
+                    f"{signal_labels}."
+                ),
+                paper_ids=[item.paper_id for item in top_items],
+                ranks=[item.rank for item in top_items],
+                evidence=FieldEvidenceStatus(
+                    status=EvidenceSupportStatus.PARTIAL,
+                    sources=_ordered_sources(
+                        [
+                            EvidenceSource.CANDIDATE_POOL,
+                            EvidenceSource.RANKING,
+                            *trend_overview.evidence_sources,
+                        ]
+                    ),
+                    note=(
+                        "Candidate-pool signals are contextual and do not replace "
+                        "paper-level evidence."
+                    ),
+                ),
+            )
+        )
+
+    return notes
+
+
+def _reading_priorities(items: Sequence[PaperBriefingItem]) -> list[ReadingPriority]:
+    priorities: list[ReadingPriority] = []
+    for priority, item in enumerate(
+        sorted(items, key=lambda item: item.rank)[:5],
+        start=1,
+    ):
+        has_abstract = item.evidence_source == EvidenceSource.ABSTRACT
+        reading_guide = item.reading_guide.claim if item.reading_guide else ""
+        priorities.append(
+            ReadingPriority(
+                priority=priority,
+                reading_intent=_reading_intent(item, priority=priority),
+                paper_id=item.paper_id,
+                rank=item.rank,
+                reason=reading_guide or item.relevance_rationale,
+                evidence=FieldEvidenceStatus(
+                    status=(
+                        EvidenceSupportStatus.SUPPORTED
+                        if has_abstract
+                        else EvidenceSupportStatus.PARTIAL
+                    ),
+                    sources=_ordered_sources(
+                        [EvidenceSource.RANKING, item.evidence_source]
+                    ),
+                    note=(
+                        "Priority uses rank, score, and abstract-backed fields."
+                        if has_abstract
+                        else "Priority is evidence-limited because the paper has no abstract."
+                    ),
+                ),
+            )
+        )
+    return priorities
+
+
+def _reading_intent(item: PaperBriefingItem, *, priority: int) -> str:
+    if item.evidence_source == EvidenceSource.METADATA:
+        return "metadata-only follow-up before making technical claims"
+    if priority == 1:
+        return "start with the strongest abstract-backed recommendation"
+    if item.method_claims and item.method_claims[0].claim:
+        return "compare method framing against the top recommendation"
+    if item.contribution_claims and item.contribution_claims[0].claim:
+        return "compare stated contributions against higher-ranked papers"
+    return "read for supporting context after the top recommendation"
 
 
 def _candidate_pool_trend_overview(
@@ -1092,10 +1304,47 @@ def _evidence_boundary(
     *,
     evidence_source: EvidenceSource,
     trend_overview: CandidatePoolTrendOverview,
+    items: Sequence[PaperBriefingItem] = (),
 ) -> BriefingEvidenceBoundary:
-    evidence_sources = _ordered_sources(
-        [evidence_source, *trend_overview.evidence_sources]
-    )
+    boundary_sources = [evidence_source, *trend_overview.evidence_sources]
+    if items:
+        boundary_sources.extend([EvidenceSource.RANKING])
+        boundary_sources.extend(item.evidence_source for item in items)
+    evidence_sources = _ordered_sources(boundary_sources)
+    abstentions = [
+        EvidenceBoundClaim(
+            claim=None,
+            evidence=FieldEvidenceStatus(
+                status=EvidenceSupportStatus.UNAVAILABLE,
+                abstention_reason=(
+                    "PDF and full-text evidence were not used in the default briefing."
+                ),
+            ),
+        ),
+        *_item_abstentions(items),
+    ]
+    if trend_overview.status == TrendAssessmentStatus.NOT_ASSESSED:
+        abstentions.append(
+            EvidenceBoundClaim(
+                claim=None,
+                evidence=FieldEvidenceStatus(
+                    status=EvidenceSupportStatus.NOT_ASSESSED,
+                    note="Candidate-pool trend analysis was not assessed.",
+                ),
+            )
+        )
+    elif trend_overview.status == TrendAssessmentStatus.INSUFFICIENT_DATA:
+        abstentions.append(
+            EvidenceBoundClaim(
+                claim=None,
+                evidence=FieldEvidenceStatus(
+                    status=EvidenceSupportStatus.INSUFFICIENT,
+                    abstention_reason=(
+                        "Candidate pool was too small for broader trend claims."
+                    ),
+                ),
+            )
+        )
     return BriefingEvidenceBoundary(
         evidence_sources=evidence_sources,
         unavailable_sources=[EvidenceSource.FULL_TEXT],
@@ -1108,7 +1357,58 @@ def _evidence_boundary(
                 else []
             ),
         ],
+        abstentions=abstentions,
     )
+
+
+def _item_abstentions(items: Sequence[PaperBriefingItem]) -> list[EvidenceBoundClaim]:
+    abstentions: list[EvidenceBoundClaim] = []
+    for item in items:
+        for field_name in ("problem", "approach", "reading_guide"):
+            claim = getattr(item, field_name)
+            if _is_abstention_claim(claim):
+                abstentions.append(
+                    EvidenceBoundClaim(
+                        claim=None,
+                        evidence=FieldEvidenceStatus(
+                            status=claim.evidence.status,
+                            note=claim.evidence.note,
+                            abstention_reason=(
+                                f"{item.paper_id} {field_name}: "
+                                f"{claim.evidence.abstention_reason or claim.evidence.note}"
+                            ),
+                        ),
+                    )
+                )
+        for field_name, claims in (
+            ("contribution", item.contribution_claims),
+            ("method", item.method_claims),
+        ):
+            for claim in claims:
+                if _is_abstention_claim(claim):
+                    abstentions.append(
+                        EvidenceBoundClaim(
+                            claim=None,
+                            evidence=FieldEvidenceStatus(
+                                status=claim.evidence.status,
+                                note=claim.evidence.note,
+                                abstention_reason=(
+                                    f"{item.paper_id} {field_name}: "
+                                    f"{claim.evidence.abstention_reason or claim.evidence.note}"
+                                ),
+                            ),
+                        )
+                    )
+    return abstentions
+
+
+def _is_abstention_claim(claim: EvidenceBoundClaim | None) -> bool:
+    if claim is None:
+        return False
+    return claim.evidence.status in {
+        EvidenceSupportStatus.UNAVAILABLE,
+        EvidenceSupportStatus.INSUFFICIENT,
+    }
 
 
 def _trend_metadata(overview: CandidatePoolTrendOverview) -> dict[str, Any]:

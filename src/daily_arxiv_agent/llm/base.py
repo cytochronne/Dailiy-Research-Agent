@@ -5,13 +5,17 @@ from __future__ import annotations
 from typing import Any, Protocol, Sequence
 
 from daily_arxiv_agent.contracts import (
+    BriefingEvidenceBoundary,
+    CandidatePoolTrendOverview,
     EvidenceSource,
     ExplanationMode,
     PaperBriefingItem,
     PaperDeepExplanation,
     PaperMetadata,
+    ReadingPriority,
     Recommendation,
     RetrievalQuery,
+    TopKComparisonNote,
 )
 
 
@@ -32,6 +36,10 @@ class LLMProvider(Protocol):
         *,
         topic: str,
         items: Sequence[PaperBriefingItem],
+        trend_overview: CandidatePoolTrendOverview | None = None,
+        top_k_comparisons: Sequence[TopKComparisonNote] = (),
+        reading_priorities: Sequence[ReadingPriority] = (),
+        evidence_boundary: BriefingEvidenceBoundary | None = None,
     ) -> str:
         """Return the executive summary for a daily briefing."""
 

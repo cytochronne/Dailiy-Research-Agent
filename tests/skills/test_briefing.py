@@ -2,6 +2,7 @@ from datetime import date
 
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
+    EvidenceSupportStatus,
     PaperMetadata,
     Provenance,
     QueryPlan,
@@ -137,6 +138,15 @@ class FailingExtractionProvider(FakeLLMProvider):
         raise RuntimeError("extraction unavailable")
 
 
+class CapturingSummaryProvider(FakeLLMProvider):
+    def __init__(self) -> None:
+        self.summary_kwargs = {}
+
+    def summarize_briefing(self, **kwargs):  # noqa: ANN003, ANN201
+        self.summary_kwargs = kwargs
+        return super().summarize_briefing(**kwargs)
+
+
 def test_briefing_generation_includes_summary_table_highlight_and_all_references() -> None:
     recommendations = [
         make_recommendation("2604.00001", 1),
@@ -158,6 +168,9 @@ def test_briefing_generation_includes_summary_table_highlight_and_all_references
     assert [row.paper_id for row in briefing.summary_table] == ["2604.00001", "2604.00002"]
     assert [item.paper_id for item in briefing.items] == ["2604.00001", "2604.00002"]
     assert all(row.evidence_source == EvidenceSource.ABSTRACT for row in briefing.summary_table)
+    assert briefing.top_k_comparisons
+    assert briefing.reading_priorities
+    assert briefing.evidence_boundary.full_text_used is False
 
 
 def test_briefing_generation_handles_empty_recommendations() -> None:
@@ -183,6 +196,12 @@ def test_llm_adapter_failure_returns_fallback_briefing() -> None:
     assert result.error.code == "llm_briefing_failed"
     assert result.data is not None
     assert result.data.highlighted_paper is not None
+    assert result.data.top_k_comparisons
+    assert result.data.reading_priorities
+    assert result.data.evidence_boundary.full_text_used is False
+    assert result.data.evidence_boundary.abstentions
+    assert "comparison note" in result.data.executive_summary
+    assert "Candidate-pool trend status" in result.data.executive_summary
 
 
 def test_extraction_failure_propagates_to_fallback_briefing_status() -> None:
@@ -197,6 +216,8 @@ def test_extraction_failure_propagates_to_fallback_briefing_status() -> None:
     assert result.message == "Using fallback extraction for one or more briefing items."
     assert result.data is not None
     assert result.data.highlighted_paper is not None
+    assert result.data.top_k_comparisons
+    assert result.data.reading_priorities
 
 
 def test_candidate_pool_trends_report_repeated_topics_categories_and_coverage() -> None:
@@ -290,6 +311,87 @@ def test_candidate_pool_trends_report_repeated_topics_categories_and_coverage() 
     assert labels["robotic manipulation"].query_echo is False
     assert "cs.RO" in labels
     assert labels["cs.RO"].signal_type == TrendSignalType.CATEGORY
+
+
+def test_fake_provider_summary_mentions_reading_guidance_and_trend_context() -> None:
+    candidates = [
+        make_candidate(
+            "2604.60001",
+            "Robotic Manipulation with Embodied Control",
+            "Robotic manipulation uses embodied control policies.",
+            categories=["cs.RO"],
+        ),
+        make_candidate(
+            "2604.60002",
+            "Embodied Control for Robot Hands",
+            "Embodied control improves robotic manipulation.",
+            categories=["cs.RO"],
+        ),
+        make_candidate(
+            "2604.60003",
+            "Robotic Manipulation from Demonstrations",
+            "Robotic manipulation learns from demonstrations.",
+            categories=["cs.RO", "cs.LG"],
+        ),
+    ]
+
+    result = DailyBriefingSkill(provider=FakeLLMProvider()).generate(
+        topic="robotic manipulation",
+        recommendations=[
+            Recommendation(
+                paper=candidates[0],
+                rank=1,
+                score=9.0,
+                rationale="Matched robotic manipulation.",
+                evidence_source=EvidenceSource.ABSTRACT,
+                score_breakdown=RankingScoreBreakdown(
+                    matched_terms=["robotic", "manipulation"],
+                    matched_phrases=["robotic manipulation"],
+                ),
+            )
+        ],
+        candidate_papers=candidates,
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    assert result.data is not None
+    summary = result.data.executive_summary.lower()
+    assert "top-k reading guidance" in summary
+    assert "candidate-pool trend context" in summary
+
+
+def test_briefing_passes_enhanced_allowlisted_context_to_provider() -> None:
+    provider = CapturingSummaryProvider()
+    recommendations = [
+        make_recommendation("2604.70001", 1),
+        make_recommendation(
+            "2604.70002",
+            2,
+            "Daily Research Recommendation Workflows",
+        ),
+    ]
+
+    result = DailyBriefingSkill(provider=provider).generate(
+        topic="agent briefing",
+        recommendations=recommendations,
+        candidate_papers=[recommendation.paper for recommendation in recommendations],
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    captured = provider.summary_kwargs
+    assert captured["trend_overview"].top_k_count == 2
+    assert captured["top_k_comparisons"]
+    assert captured["reading_priorities"]
+    assert captured["evidence_boundary"].full_text_used is False
+    item = captured["items"][0]
+    assert item.problem is not None
+    assert item.reading_guide is not None
+    assert item.contribution_claims
+    assert item.method_claims
+    assert captured["reading_priorities"][0].evidence.status in {
+        EvidenceSupportStatus.SUPPORTED,
+        EvidenceSupportStatus.PARTIAL,
+    }
 
 
 def test_candidate_pool_trends_are_not_assessed_without_candidate_pool() -> None:

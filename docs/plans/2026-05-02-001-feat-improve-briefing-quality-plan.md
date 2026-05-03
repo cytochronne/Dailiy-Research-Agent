@@ -194,7 +194,7 @@ flowchart TD
 **Verification:**
 - Briefing tests can validate trend signal generation with no live LLM and no PDF parsing.
 
-- [ ] **Unit 3: Richer Top-K Extraction and Provider Synthesis**
+- [x] **Unit 3: Richer Top-K Extraction and Provider Synthesis**
 
 **Goal:** Make Top-K paper briefs and provider-generated executive summaries use richer, evidence-grounded inputs while preserving fake/offline behavior.
 

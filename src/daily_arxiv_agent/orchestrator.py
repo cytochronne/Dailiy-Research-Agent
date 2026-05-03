@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from inspect import Parameter, signature
 from typing import Any, TypeVar
 from uuid import uuid4
@@ -258,11 +258,22 @@ class DailyArxivAgentOrchestrator:
             output_summary=f"{len(extraction_result.data or [])} briefing item(s) extracted",
         )
 
+        retrieval_source_metadata_by_paper_id = _source_metadata_by_paper_id(
+            retrieval_result.metadata
+        )
         briefing_result = _safe_skill_call(
-            lambda: self.briefing_skill.generate(
+            lambda: _generate_briefing_with_optional_context(
+                self.briefing_skill,
                 topic=workflow_topic,
                 recommendations=recommendations,
                 extraction_results=item_results,
+                candidate_papers=papers,
+                query_plan=query_plan,
+                retrieval_query=query,
+                retrieval_source_metadata_by_paper_id=(
+                    retrieval_source_metadata_by_paper_id
+                ),
+                ranking_metadata=ranking_result.metadata,
             ),
             data_default=None,
             error_code="briefing_skill_failed",
@@ -276,6 +287,15 @@ class DailyArxivAgentOrchestrator:
                 "briefing generated"
                 if briefing_result.data is not None
                 else "no briefing generated"
+            ),
+            metadata=_trace_metadata(
+                "briefing",
+                _briefing_trace_metadata(
+                    briefing_result,
+                    item_count=len(extraction_result.data or []),
+                    candidate_count=len(papers),
+                ),
+                include_debug=include_debug_trace,
             ),
         )
 
@@ -740,6 +760,22 @@ def _trace_metadata(
             ),
         )
 
+    if skill == "briefing":
+        return _pick_metadata(
+            metadata,
+            (
+                "topic",
+                "item_count",
+                "candidate_count",
+                "trend_status",
+                "trend_signal_count",
+                "query_echo_count",
+                "representative_signal_count",
+                "evidence_boundary",
+                "fallback_section_availability",
+            ),
+        )
+
     if skill == "followup_filter":
         return _pick_metadata(
             metadata,
@@ -757,6 +793,148 @@ def _trace_metadata(
         )
 
     return metadata
+
+
+def _source_metadata_by_paper_id(
+    metadata: Mapping[str, Any],
+) -> Mapping[str, object] | None:
+    source_metadata = metadata.get("source_metadata_by_paper_id")
+    if isinstance(source_metadata, Mapping):
+        return source_metadata
+    return None
+
+
+def _generate_briefing_with_optional_context(
+    briefing_skill: Any,
+    *,
+    topic: str,
+    recommendations: Sequence[Recommendation],
+    extraction_results: Sequence[SkillResult[PaperBriefingItem]],
+    candidate_papers: Sequence[PaperMetadata],
+    query_plan: QueryPlan,
+    retrieval_query: RetrievalQuery,
+    retrieval_source_metadata_by_paper_id: Mapping[str, object] | None,
+    ranking_metadata: Mapping[str, object],
+) -> SkillResult[DailyBriefing]:
+    generate = briefing_skill.generate
+    kwargs: dict[str, Any] = {
+        "topic": topic,
+        "recommendations": recommendations,
+    }
+    optional_kwargs: dict[str, Any] = {
+        "extraction_results": extraction_results,
+        "candidate_papers": candidate_papers,
+        "query_plan": query_plan,
+        "retrieval_query": retrieval_query,
+        "retrieval_source_metadata_by_paper_id": (
+            retrieval_source_metadata_by_paper_id
+        ),
+        "ranking_metadata": ranking_metadata,
+    }
+    for key, value in optional_kwargs.items():
+        if _call_accepts_keyword(generate, key):
+            kwargs[key] = value
+    return generate(**kwargs)
+
+
+def _briefing_trace_metadata(
+    result: SkillResult[DailyBriefing],
+    *,
+    item_count: int,
+    candidate_count: int,
+) -> dict[str, Any]:
+    metadata = _pick_metadata(result.metadata, ("topic",))
+    metadata["item_count"] = item_count
+    metadata["candidate_count"] = candidate_count
+
+    trend_metadata = result.metadata.get("trend_analysis")
+    if isinstance(trend_metadata, Mapping):
+        metadata["candidate_count"] = trend_metadata.get(
+            "candidate_count", candidate_count
+        )
+        metadata["trend_status"] = trend_metadata.get("status")
+        metadata["trend_signal_count"] = trend_metadata.get("signal_count", 0)
+        metadata["query_echo_count"] = trend_metadata.get(
+            "query_echo_signal_count", 0
+        )
+        metadata["representative_signal_count"] = trend_metadata.get(
+            "representative_signal_count", 0
+        )
+
+    briefing = result.data
+    if briefing is None:
+        metadata.setdefault("trend_signal_count", 0)
+        metadata.setdefault("query_echo_count", 0)
+        metadata.setdefault("representative_signal_count", 0)
+        metadata["fallback_section_availability"] = {
+            "trend_overview": False,
+            "top_k_comparisons": False,
+            "reading_priorities": False,
+            "evidence_boundary": False,
+        }
+        return metadata
+
+    overview = briefing.trend_overview
+    metadata.update(
+        {
+            "item_count": len(briefing.items),
+            "candidate_count": overview.candidate_count,
+            "trend_status": overview.status.value,
+            "trend_signal_count": len(overview.signals),
+            "query_echo_count": sum(
+                1 for signal in overview.signals if signal.query_echo
+            ),
+            "representative_signal_count": sum(
+                1
+                for signal in overview.signals
+                if signal.signal_type.value == "hotspot"
+                or (
+                    signal.signal_type.value == "topic"
+                    and signal.strength.value != "weak"
+                )
+            ),
+            "evidence_boundary": _briefing_evidence_boundary_trace(
+                briefing.evidence_boundary
+            ),
+            "fallback_section_availability": _briefing_section_availability(
+                briefing
+            ),
+        }
+    )
+    return metadata
+
+
+def _briefing_evidence_boundary_trace(boundary: Any) -> dict[str, Any]:
+    return {
+        "evidence_sources": [source.value for source in boundary.evidence_sources],
+        "unavailable_sources": [
+            source.value for source in boundary.unavailable_sources
+        ],
+        "full_text_used": boundary.full_text_used,
+        "note_count": len(boundary.notes),
+        "abstention_count": len(boundary.abstentions),
+    }
+
+
+def _briefing_section_availability(briefing: DailyBriefing) -> dict[str, bool]:
+    trend_overview = briefing.trend_overview
+    evidence_boundary = briefing.evidence_boundary
+    return {
+        "trend_overview": bool(
+            trend_overview.summary
+            or trend_overview.signals
+            or trend_overview.limitations
+            or trend_overview.candidate_count
+        ),
+        "top_k_comparisons": bool(briefing.top_k_comparisons),
+        "reading_priorities": bool(briefing.reading_priorities),
+        "evidence_boundary": bool(
+            evidence_boundary.evidence_sources
+            or evidence_boundary.unavailable_sources
+            or evidence_boundary.notes
+            or evidence_boundary.abstentions
+        ),
+    }
 
 
 def _pick_metadata(metadata: dict[str, Any], keys: Sequence[str]) -> dict[str, Any]:

@@ -242,7 +242,7 @@ flowchart TD
 **Verification:**
 - Provider and Skill tests prove richer inputs and structured fallback work under fake and live-provider adapters.
 
-- [ ] **Unit 4: Orchestrator Integration and Trace Metadata**
+- [x] **Unit 4: Orchestrator Integration and Trace Metadata**
 
 **Goal:** Pass candidate-pool and ranking/retrieval context into briefing without changing retrieval or ranking semantics.
 

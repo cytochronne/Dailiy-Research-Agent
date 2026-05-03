@@ -9,6 +9,7 @@ from daily_arxiv_agent.contracts import (
     ExplanationMode,
     PaperMetadata,
     Provenance,
+    RetrievalSourceMetadata,
     QueryPlannerMode,
     Recommendation,
     RetrievalQuery,
@@ -20,8 +21,10 @@ from daily_arxiv_agent.contracts import (
 from daily_arxiv_agent.llm.fake import FakeLLMProvider
 from daily_arxiv_agent.orchestrator import DailyArxivAgentOrchestrator
 from daily_arxiv_agent.skills.arxiv_retrieval import ArxivRetrievalSkill
+from daily_arxiv_agent.skills.briefing import DailyBriefingSkill
 from daily_arxiv_agent.skills.followup import FollowupQuery
 from daily_arxiv_agent.skills.query_planning import QueryPlanningSkill
+from daily_arxiv_agent.skills.ranking import TopicRankingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
 
 
@@ -66,6 +69,58 @@ class FallbackRetrievalSkill:
         )
 
 
+class StaticRetrievalSkill:
+    def __init__(self, papers: list[PaperMetadata]) -> None:
+        self.papers = papers
+        self.calls = 0
+        self.query_plans = []
+
+    def retrieve(self, query, use_cache=True, query_plan=None):  # noqa: ANN001, ANN201
+        self.calls += 1
+        self.query_plans.append(query_plan)
+        source_metadata_by_paper_id = {
+            paper.paper_id: [
+                RetrievalSourceMetadata(
+                    variant_label=(
+                        "broad_all_terms" if index % 2 == 0 else "broad_related_terms"
+                    ),
+                    sort_by="relevance",
+                    variant_index=index % 2,
+                    position=index,
+                    first_seen_order=index,
+                    query=(
+                        "RAW_EXPANDED_QUERY_SHOULD_BE_REDACTED "
+                        f"{query.topic or ''}"
+                    ),
+                ).model_dump(mode="json")
+            ]
+            for index, paper in enumerate(self.papers)
+        }
+        return SkillResult[list[PaperMetadata]](
+            status=SkillStatus.SUCCESS if self.papers else SkillStatus.EMPTY,
+            data=self.papers,
+            evidence_source=(
+                EvidenceSource.ABSTRACT
+                if any(paper.abstract for paper in self.papers)
+                else EvidenceSource.METADATA
+            ),
+            provenance=[paper.provenance for paper in self.papers],
+            metadata={
+                "cache_hit": False,
+                "query_variant_count": query_plan.variant_count if query_plan else 0,
+                "request_count": 1,
+                "candidate_count": len(self.papers),
+                "query_plan": (
+                    query_plan.model_dump(mode="json") if query_plan is not None else None
+                ),
+                "request_params": {
+                    "search_query": "RAW_EXPANDED_QUERY_SHOULD_BE_REDACTED"
+                },
+                "source_metadata_by_paper_id": source_metadata_by_paper_id,
+            },
+        )
+
+
 class SpyRetrievalSkill:
     def __init__(self) -> None:
         self.calls = 0
@@ -78,6 +133,41 @@ class SpyRetrievalSkill:
 class RaisingPlannerProvider:
     def plan_queries(self, **kwargs):  # noqa: ANN003, ANN201
         raise RuntimeError("planner service unavailable")
+
+
+class FailingSummaryProvider(FakeLLMProvider):
+    def summarize_briefing(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("summary unavailable")
+
+
+class CapturingBriefingSkill(DailyBriefingSkill):
+    def __init__(self) -> None:
+        super().__init__(provider=FakeLLMProvider())
+        self.calls = []
+
+    def generate(self, **kwargs):  # noqa: ANN003, ANN201
+        self.calls.append(kwargs)
+        return super().generate(**kwargs)
+
+
+class LegacyBriefingSkill:
+    def __init__(self) -> None:
+        self.delegate = DailyBriefingSkill(provider=FakeLLMProvider())
+
+    def generate(self, *, topic, recommendations):  # noqa: ANN001, ANN201
+        return self.delegate.generate(topic=topic, recommendations=recommendations)
+
+
+class SpyRankingSkill:
+    def __init__(self) -> None:
+        self.delegate = TopicRankingSkill()
+        self.calls = 0
+        self.kwargs = []
+
+    def rank(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        self.calls += 1
+        self.kwargs.append(kwargs)
+        return self.delegate.rank(*args, **kwargs)
 
 
 def make_paper(
@@ -103,6 +193,35 @@ def make_paper(
             query="agent briefing",
         ),
     )
+
+
+def make_trend_papers() -> list[PaperMetadata]:
+    return [
+        make_paper(
+            "2604.91001",
+            "Robotic Manipulation for Household Assistance",
+            "Robotic manipulation systems coordinate perception and control.",
+            category="cs.RO",
+        ),
+        make_paper(
+            "2604.91002",
+            "Robotic Manipulation with Policy Learning",
+            "Robotic manipulation policies improve dexterous control.",
+            category="cs.LG",
+        ),
+        make_paper(
+            "2604.91003",
+            "Robotic Manipulation Benchmarks",
+            "Robotic manipulation benchmarks compare embodied agents.",
+            category="cs.RO",
+        ),
+        make_paper(
+            "2604.91004",
+            "Robotic Manipulation from Demonstrations",
+            "Robotic manipulation from demonstrations supports robot learning.",
+            category="cs.AI",
+        ),
+    ]
 
 
 def make_recommendation(paper: PaperMetadata, rank: int, score: float) -> Recommendation:
@@ -172,9 +291,157 @@ def test_recommendation_workflow_returns_ordered_trace_and_briefing(tmp_path) ->
     assert len(workflow.recommendations) == 2
     assert workflow.briefing is not None
     assert workflow.briefing.highlighted_paper is not None
+    briefing_metadata = workflow.trace[4].metadata
+    assert briefing_metadata["item_count"] == 2
+    assert briefing_metadata["candidate_count"] == 2
+    assert briefing_metadata["trend_status"] == "insufficient_candidate_data"
+    assert briefing_metadata["trend_signal_count"] == 0
+    assert briefing_metadata["query_echo_count"] == 0
+    assert briefing_metadata["evidence_boundary"]["full_text_used"] is False
+    assert "full_text" in briefing_metadata["evidence_boundary"]["unavailable_sources"]
     assert client.calls == 1
     assert result.provenance is not None
     assert len(result.provenance) == 2
+
+
+def test_recommendation_workflow_passes_candidate_context_into_briefing_trace(
+    tmp_path,
+) -> None:
+    papers = make_trend_papers()
+    retrieval = StaticRetrievalSkill(papers)
+    ranking = SpyRankingSkill()
+    briefing = CapturingBriefingSkill()
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        retrieval_skill=retrieval,
+        ranking_skill=ranking,
+        briefing_skill=briefing,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic="robotic manipulation",
+            category="cs.RO",
+            max_results=4,
+            search_mode=SearchMode.BROAD,
+        ),
+        top_k=2,
+        use_cache=False,
+        run_id="run-briefing-context",
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    workflow = result.data
+    assert workflow is not None
+    assert workflow.briefing is not None
+    assert retrieval.calls == 1
+    assert ranking.calls == 1
+    assert len(briefing.calls) == 1
+
+    briefing_kwargs = briefing.calls[0]
+    assert briefing_kwargs["candidate_papers"] == papers
+    assert briefing_kwargs["recommendations"] == workflow.recommendations
+    assert len(briefing_kwargs["extraction_results"]) == len(workflow.recommendations)
+    assert briefing_kwargs["query_plan"].required_terms == [
+        "robotic",
+        "manipulation",
+    ]
+    assert briefing_kwargs["retrieval_query"].topic == "robotic manipulation"
+    assert briefing_kwargs["retrieval_source_metadata_by_paper_id"]
+    assert briefing_kwargs["ranking_metadata"]["ranking_mode"] == "query_plan"
+
+    overview = workflow.briefing.trend_overview
+    assert overview.candidate_count == len(papers)
+    assert overview.top_k_count == 2
+    assert any(signal.query_echo for signal in overview.signals)
+
+    briefing_step = workflow.trace[4]
+    assert briefing_step.skill == "briefing"
+    assert briefing_step.metadata["item_count"] == 2
+    assert briefing_step.metadata["candidate_count"] == len(papers)
+    assert briefing_step.metadata["trend_status"] == overview.status.value
+    assert briefing_step.metadata["trend_signal_count"] == len(overview.signals)
+    assert briefing_step.metadata["query_echo_count"] >= 1
+    assert briefing_step.metadata["evidence_boundary"]["full_text_used"] is False
+    assert briefing_step.metadata["fallback_section_availability"] == {
+        "trend_overview": True,
+        "top_k_comparisons": True,
+        "reading_priorities": True,
+        "evidence_boundary": True,
+    }
+
+    trace_metadata = json.dumps(
+        [step.metadata for step in workflow.trace],
+        sort_keys=True,
+        default=str,
+    )
+    assert "RAW_EXPANDED_QUERY_SHOULD_BE_REDACTED" not in trace_metadata
+    assert "search_query" not in trace_metadata
+    assert "source_metadata_by_paper_id" not in workflow.trace[1].metadata
+
+
+def test_briefing_llm_failure_marks_workflow_fallback_with_enhanced_sections(
+    tmp_path,
+) -> None:
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        retrieval_skill=StaticRetrievalSkill(make_trend_papers()),
+        provider=FailingSummaryProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(topic="robotic manipulation", category="cs.RO", max_results=4),
+        top_k=2,
+        use_cache=False,
+        run_id="run-briefing-fallback",
+    )
+
+    assert result.status == SkillStatus.FALLBACK
+    assert result.error is not None
+    assert result.error.code == "llm_briefing_failed"
+    workflow = result.data
+    assert workflow is not None
+    assert workflow.briefing is not None
+    assert workflow.briefing.top_k_comparisons
+    assert workflow.briefing.reading_priorities
+    assert workflow.briefing.evidence_boundary.full_text_used is False
+
+    briefing_step = workflow.trace[4]
+    assert briefing_step.status == SkillStatus.FALLBACK
+    assert briefing_step.error_code == "llm_briefing_failed"
+    assert briefing_step.metadata["fallback_section_availability"] == {
+        "trend_overview": True,
+        "top_k_comparisons": True,
+        "reading_priorities": True,
+        "evidence_boundary": True,
+    }
+    assert briefing_step.metadata["evidence_boundary"]["full_text_used"] is False
+
+
+def test_orchestrator_supports_direct_like_briefing_skill_without_context_kwargs(
+    tmp_path,
+) -> None:
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        retrieval_skill=StaticRetrievalSkill(make_trend_papers()[:1]),
+        briefing_skill=LegacyBriefingSkill(),
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(topic="robotic manipulation", category="cs.RO", max_results=1),
+        top_k=1,
+        use_cache=False,
+        run_id="run-legacy-briefing",
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    workflow = result.data
+    assert workflow is not None
+    assert workflow.briefing is not None
+    assert workflow.briefing.trend_overview.status.value == "not_assessed"
+    assert workflow.trace[4].metadata["trend_status"] == "not_assessed"
 
 
 def test_recommendation_workflow_records_planner_fallback_and_continues(

@@ -400,6 +400,182 @@ def briefing_rows(briefing: DailyBriefing | None) -> list[dict[str, object]]:
     ]
 
 
+def enhanced_briefing_sections(
+    briefing: DailyBriefing | None,
+) -> list[dict[str, object]]:
+    """Convert enhanced briefing fields into renderable section dictionaries."""
+
+    if briefing is None:
+        return []
+
+    trend = briefing.trend_overview
+    boundary = briefing.evidence_boundary
+    return [
+        {
+            "key": "executive_summary",
+            "title": "Executive Summary",
+            "body": briefing.executive_summary,
+        },
+        {
+            "key": "top_k_reading_guide",
+            "title": "Top-K Reading Guide",
+            "summary_rows": briefing_rows(briefing),
+            "paper_briefs": briefing_paper_brief_rows(briefing),
+        },
+        {
+            "key": "trend_hotspot_overview",
+            "title": "Trend / Hotspot Overview",
+            "status": trend.status.value,
+            "summary": (
+                trend.summary
+                or _trend_status_note(trend.status.value, trend.limitations)
+            ),
+            "candidate_count": trend.candidate_count,
+            "abstract_count": trend.abstract_count,
+            "metadata_only_count": trend.metadata_only_count,
+            "top_k_count": trend.top_k_count,
+            "evidence": _evidence_sources_text(trend.evidence_sources),
+            "limitations": list(trend.limitations),
+            "signals": briefing_trend_signal_rows(briefing),
+        },
+        {
+            "key": "top_k_comparison",
+            "title": "Top-K Comparison",
+            "rows": briefing_comparison_rows(briefing),
+        },
+        {
+            "key": "reading_priorities",
+            "title": "Reading Priorities",
+            "rows": briefing_reading_priority_rows(briefing),
+        },
+        {
+            "key": "evidence_boundary",
+            "title": "Evidence Boundary",
+            "full_text_used": "yes" if boundary.full_text_used else "no",
+            "evidence_sources": _evidence_sources_text(boundary.evidence_sources),
+            "unavailable_sources": _evidence_sources_text(
+                boundary.unavailable_sources
+            ),
+            "notes": list(boundary.notes),
+            "abstentions": [
+                _claim_text(abstention) for abstention in boundary.abstentions
+            ],
+        },
+    ]
+
+
+def briefing_paper_brief_rows(
+    briefing: DailyBriefing | None,
+) -> list[dict[str, object]]:
+    """Render detailed Top-K briefing items as row dictionaries."""
+
+    if briefing is None:
+        return []
+    rows: list[dict[str, object]] = []
+    for item in sorted(briefing.items, key=lambda value: value.rank):
+        rows.append(
+            {
+                "rank": item.rank,
+                "paper_id": item.paper_id,
+                "title": item.title,
+                "score": round(item.score, 4),
+                "evidence": item.evidence_source.value,
+                "summary": item.summary,
+                "problem": _claim_text(item.problem),
+                "approach": _claim_text(item.approach),
+                "reading_guide": _claim_text(item.reading_guide),
+                "contributions": _text_list(
+                    [
+                        *item.contributions,
+                        *[
+                            _claim_text(claim)
+                            for claim in item.contribution_claims
+                        ],
+                    ]
+                ),
+                "methods": _text_list(
+                    [
+                        *item.methods,
+                        *[_claim_text(claim) for claim in item.method_claims],
+                    ]
+                ),
+                "relevance_rationale": item.relevance_rationale,
+                "relevance_evidence": _evidence_status_text(
+                    item.relevance_evidence
+                ),
+                "arxiv_url": str(item.arxiv_url),
+            }
+        )
+    return rows
+
+
+def briefing_trend_signal_rows(
+    briefing: DailyBriefing | None,
+) -> list[dict[str, object]]:
+    """Render candidate-pool trend and hotspot signals."""
+
+    if briefing is None:
+        return []
+    return [
+        {
+            "label": signal.label,
+            "type": signal.signal_type.value,
+            "strength": signal.strength.value,
+            "support_count": signal.support_count,
+            "candidate_count": (
+                signal.candidate_count if signal.candidate_count is not None else ""
+            ),
+            "top_k_count": (
+                signal.top_k_count if signal.top_k_count is not None else ""
+            ),
+            "query_echo": "yes" if signal.query_echo else "no",
+            "evidence": _evidence_sources_text(signal.evidence_sources),
+            "summary": signal.summary or "",
+            "limitations": "; ".join(signal.limitations),
+        }
+        for signal in briefing.trend_overview.signals
+    ]
+
+
+def briefing_comparison_rows(
+    briefing: DailyBriefing | None,
+) -> list[dict[str, object]]:
+    """Render Top-K comparison notes."""
+
+    if briefing is None:
+        return []
+    return [
+        {
+            "dimension": comparison.dimension,
+            "note": comparison.note,
+            "paper_ids": ", ".join(comparison.paper_ids),
+            "ranks": ", ".join(str(rank) for rank in comparison.ranks),
+            "evidence": _evidence_status_text(comparison.evidence),
+        }
+        for comparison in briefing.top_k_comparisons
+    ]
+
+
+def briefing_reading_priority_rows(
+    briefing: DailyBriefing | None,
+) -> list[dict[str, object]]:
+    """Render goal-aware reading priorities."""
+
+    if briefing is None:
+        return []
+    return [
+        {
+            "priority": priority.priority,
+            "reading_intent": priority.reading_intent,
+            "paper_id": priority.paper_id,
+            "rank": priority.rank,
+            "reason": priority.reason,
+            "evidence": _evidence_status_text(priority.evidence),
+        }
+        for priority in briefing.reading_priorities
+    ]
+
+
 def result_notice(
     result: SkillResult[Any] | None,
     *,
@@ -694,11 +870,7 @@ def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -
         return
 
     if workflow.briefing is not None:
-        st.subheader("Daily Briefing")
-        st.write(workflow.briefing.executive_summary)
-        briefing_table = briefing_rows(workflow.briefing)
-        if briefing_table:
-            st.dataframe(briefing_table, use_container_width=True, hide_index=True)
+        _render_daily_briefing(st, workflow.briefing)
 
     st.subheader("Ranked Recommendations")
     st.dataframe(
@@ -1079,6 +1251,81 @@ def _build_retrieval_query(state: Mapping[str, Any]) -> RetrievalQuery:
     )
 
 
+def _render_daily_briefing(st: Any, briefing: DailyBriefing) -> None:
+    sections = {section["key"]: section for section in enhanced_briefing_sections(briefing)}
+
+    executive = sections["executive_summary"]
+    st.subheader(str(executive["title"]))
+    st.write(executive["body"])
+
+    guide = sections["top_k_reading_guide"]
+    st.subheader(str(guide["title"]))
+    summary_rows = guide["summary_rows"]
+    if summary_rows:
+        st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+    for brief in guide["paper_briefs"]:
+        with st.expander(
+            f"Rank {brief['rank']}: {brief['title']}",
+            expanded=brief["rank"] == 1,
+        ):
+            st.caption(
+                f"Paper ID: {brief['paper_id']} | Evidence: {brief['evidence']} | "
+                f"Score: {brief['score']}"
+            )
+            st.write(brief["summary"])
+            _render_labeled_text(st, "Problem", brief["problem"])
+            _render_labeled_text(st, "Approach", brief["approach"])
+            _render_labeled_text(st, "Reading Guide", brief["reading_guide"])
+            _render_labeled_text(st, "Contributions", brief["contributions"])
+            _render_labeled_text(st, "Methods", brief["methods"])
+            _render_labeled_text(
+                st,
+                "Relevance",
+                f"{brief['relevance_rationale']} {brief['relevance_evidence']}",
+            )
+
+    trend = sections["trend_hotspot_overview"]
+    st.subheader(str(trend["title"]))
+    st.write(trend["summary"])
+    st.caption(
+        f"Status: {trend['status']} | Candidates: {trend['candidate_count']} | "
+        f"Abstract-backed: {trend['abstract_count']} | "
+        f"Metadata-only: {trend['metadata_only_count']} | "
+        f"Top-K: {trend['top_k_count']}"
+    )
+    if trend["signals"]:
+        st.dataframe(trend["signals"], use_container_width=True, hide_index=True)
+    else:
+        notes = trend["limitations"] or [trend["summary"]]
+        st.info(" ".join(str(note) for note in notes if note))
+
+    comparison = sections["top_k_comparison"]
+    st.subheader(str(comparison["title"]))
+    comparison_rows = comparison["rows"]
+    if comparison_rows:
+        st.dataframe(comparison_rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("No Top-K comparison notes were available for this run.")
+
+    priorities = sections["reading_priorities"]
+    st.subheader(str(priorities["title"]))
+    priority_rows = priorities["rows"]
+    if priority_rows:
+        st.dataframe(priority_rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("No reading priorities were available for this run.")
+
+    boundary = sections["evidence_boundary"]
+    st.subheader(str(boundary["title"]))
+    st.caption(
+        f"Full text used: {boundary['full_text_used']} | "
+        f"Evidence: {boundary['evidence_sources']} | "
+        f"Unavailable: {boundary['unavailable_sources']}"
+    )
+    _render_list_section(st, "Boundary Notes", boundary["notes"])
+    _render_list_section(st, "Explicit Abstentions", boundary["abstentions"])
+
+
 def _render_explanation(st: Any, explanation: PaperDeepExplanation) -> None:
     st.subheader(explanation.title)
     st.caption(
@@ -1119,6 +1366,14 @@ def _render_list_section(st: Any, title: str, items: Sequence[str]) -> None:
         return
     for item in items:
         st.markdown(f"- {item}")
+
+
+def _render_labeled_text(st: Any, title: str, value: object) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    st.markdown(f"**{title}**")
+    st.write(text)
 
 
 def _render_notice(
@@ -1234,6 +1489,64 @@ def _option_index(
     if default_value is not None and default_value in options:
         return options.index(default_value)
     return 0
+
+
+def _claim_text(claim: Any) -> str:
+    if claim is None:
+        return ""
+    claim_text = getattr(claim, "claim", None)
+    evidence = getattr(claim, "evidence", None)
+    if claim_text:
+        evidence_text = _evidence_status_text(evidence)
+        if evidence_text:
+            return f"{claim_text} ({evidence_text})"
+        return str(claim_text)
+    return _evidence_status_text(evidence)
+
+
+def _evidence_status_text(evidence: Any) -> str:
+    if evidence is None:
+        return ""
+    status = getattr(getattr(evidence, "status", None), "value", None)
+    parts = [str(status or getattr(evidence, "status", ""))]
+    sources = _evidence_sources_text(getattr(evidence, "sources", []))
+    if sources:
+        parts.append(f"sources: {sources}")
+    note = getattr(evidence, "note", None)
+    if note:
+        parts.append(str(note))
+    abstention = getattr(evidence, "abstention_reason", None)
+    if abstention:
+        parts.append(str(abstention))
+    return "; ".join(part for part in parts if part)
+
+
+def _evidence_sources_text(sources: Sequence[Any]) -> str:
+    return ", ".join(
+        str(getattr(source, "value", source)) for source in sources if source
+    )
+
+
+def _text_list(values: Sequence[str]) -> str:
+    texts: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = " ".join(str(value).split())
+        if not normalized or normalized in seen:
+            continue
+        texts.append(normalized)
+        seen.add(normalized)
+    return "; ".join(texts)
+
+
+def _trend_status_note(status: str, limitations: Sequence[str]) -> str:
+    if limitations:
+        return " ".join(limitations)
+    if status == "not_assessed":
+        return "Candidate-pool trend analysis was not assessed for this briefing."
+    if status == "insufficient_candidate_data":
+        return "Candidate pool was too small for broader trend claims."
+    return f"Candidate-pool trend analysis status: {status}."
 
 
 def _metadata_for_skill(

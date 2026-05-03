@@ -50,3 +50,17 @@
 ## Acceptance Question
 
 Is keyword ranking and briefing output good enough for the MVP?
+
+## Enhanced Surface Update
+
+The MVP shape remains valid for backward compatibility: executive summary, compact summary table, highlighted paper, and ranked briefing items are still present.
+
+The current enhanced briefing surface adds sections after the MVP fields:
+
+1. Top-K reading guide, with the compact summary table as the index.
+2. Candidate-pool trend or hotspot overview when enough candidate evidence is available.
+3. Top-K comparison notes.
+4. Goal-aware reading priorities.
+5. Evidence boundary and explicit abstentions.
+
+The default briefing is still abstract, metadata, ranking, and retrieval-metadata only. It does not parse PDFs or make full-text claims. See `docs/demo/enhanced-briefing-demo.md` for the current compact CLI and UI-oriented example.

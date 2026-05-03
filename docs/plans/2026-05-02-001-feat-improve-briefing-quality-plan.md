@@ -278,7 +278,7 @@ flowchart TD
 **Verification:**
 - Orchestrator tests prove the new briefing inputs compose with query planning, retrieval, ranking, extraction, and fallback status.
 
-- [ ] **Unit 5: UI, CLI, and Documentation Surface**
+- [x] **Unit 5: UI, CLI, and Documentation Surface**
 
 **Goal:** Render enhanced briefing sections clearly in daily workflow outputs without making the main UI noisy.
 

@@ -110,7 +110,7 @@ stored = store.find_papers(
 
 ## Topic Ranking and Daily Briefing
 
-Unit 2 adds deterministic keyword ranking, structured paper extraction behind an LLM provider boundary, and first-pass daily briefing generation:
+Unit 2 adds deterministic keyword ranking, structured paper extraction behind an LLM provider boundary, and daily briefing generation:
 
 - `daily_arxiv_agent.skills.ranking.TopicRankingSkill`
 - `daily_arxiv_agent.skills.extraction.PaperExtractionSkill`
@@ -118,6 +118,8 @@ Unit 2 adds deterministic keyword ranking, structured paper extraction behind an
 - `daily_arxiv_agent.llm.fake.FakeLLMProvider`
 
 `LLM_PROVIDER=fake` uses deterministic local behavior. `LLM_PROVIDER=openai` and `LLM_PROVIDER=live` require `LLM_API_KEY` or `OPENAI_API_KEY`. Any other non-fake `LLM_PROVIDER` value is treated as a custom OpenAI-compatible Chat Completions API; this keeps local gateways possible when they do not require auth. Every briefing item carries an evidence label (`metadata` or `abstract`) and preserves the source arXiv provenance.
+
+The enhanced daily briefing keeps the legacy executive summary, summary table, highlighted paper, and item list while adding structured sections for Top-K reading guidance, candidate-pool trend or hotspot context, Top-K comparisons, reading priorities, and an evidence boundary. The default workflow is still abstract, metadata, ranking, and retrieval-metadata only. It does not download, parse, or summarize PDFs.
 
 Example:
 
@@ -320,6 +322,31 @@ daily-arxiv-agent demo \
   --top-k 2 \
   --no-cache
 ```
+
+By default the CLI prints the full workflow JSON so automation can consume trace data and enhanced briefing fields:
+
+```bash
+daily-arxiv-agent demo \
+  --fixture tests/fixtures/arxiv_atom_response.xml \
+  --topic "agent briefing" \
+  --category cs.LG \
+  --top-k 2 \
+  --no-cache
+```
+
+For a compact human-readable daily briefing, use:
+
+```bash
+daily-arxiv-agent demo \
+  --fixture tests/fixtures/arxiv_atom_response.xml \
+  --topic "agent briefing" \
+  --category cs.LG \
+  --top-k 2 \
+  --format briefing \
+  --no-cache
+```
+
+The compact renderer orders sections as executive summary, Top-K reading guide, trend or hotspot overview, Top-K comparison, reading priorities, and evidence boundary. It intentionally omits noisy trace internals while preserving fallback notices and evidence limits.
 
 Real API demo:
 

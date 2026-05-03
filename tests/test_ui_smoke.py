@@ -5,16 +5,30 @@ import importlib
 import sys
 
 from daily_arxiv_agent.contracts import (
+    BriefingEvidenceBoundary,
+    BriefingTableRow,
+    CandidatePoolTrendOverview,
+    DailyBriefing,
+    EvidenceBoundClaim,
     EvidenceSource,
+    EvidenceSupportStatus,
+    FieldEvidenceStatus,
     PaperMetadata,
     Provenance,
     QueryPlannerMode,
+    ReadingPriority,
     Recommendation,
     RetrievalQuery,
     SearchMode,
     SkillError,
     SkillResult,
     SkillStatus,
+    TopKComparisonNote,
+    TrendAssessmentStatus,
+    TrendSignal,
+    TrendSignalStrength,
+    TrendSignalType,
+    PaperBriefingItem,
 )
 from daily_arxiv_agent.orchestrator import (
     FeedbackWorkflow,
@@ -24,6 +38,8 @@ from daily_arxiv_agent.orchestrator import (
 from daily_arxiv_agent.storage import SQLitePaperStore
 import daily_arxiv_agent.ui.streamlit_app as ui_module
 from daily_arxiv_agent.ui.streamlit_app import (
+    briefing_rows,
+    enhanced_briefing_sections,
     recommendation_empty_state_message,
     recommendation_rows,
     recommendation_summary_metrics,
@@ -65,6 +81,185 @@ def make_recommendation(paper_id: str, title: str, score: float) -> Recommendati
     )
 
 
+def make_enhanced_briefing(*, trend_status: TrendAssessmentStatus) -> DailyBriefing:
+    paper = make_paper(
+        "2604.00001",
+        "Agent Workflows for Research Recommendation",
+        "Daily research agents rank and summarize new papers.",
+    )
+    metadata_paper = make_paper(
+        "2604.00002",
+        "Metadata-Only Retrieval Agents",
+        None,
+    )
+    supported = FieldEvidenceStatus(
+        status=EvidenceSupportStatus.SUPPORTED,
+        sources=[EvidenceSource.ABSTRACT],
+    )
+    metadata_limited = FieldEvidenceStatus(
+        status=EvidenceSupportStatus.UNAVAILABLE,
+        abstention_reason="No abstract is available to support this field.",
+    )
+    items = [
+        PaperBriefingItem(
+            paper_id=paper.paper_id,
+            title=paper.title,
+            rank=1,
+            score=8.5,
+            summary="Agent workflows can structure daily research recommendation.",
+            contributions=["Connects ranking evidence to a briefing workflow."],
+            methods=["Staged retrieval, ranking, and synthesis."],
+            relevance_rationale="Matched agent and briefing terms.",
+            evidence_source=EvidenceSource.ABSTRACT,
+            provenance=paper.provenance,
+            arxiv_url=paper.arxiv_url,
+            problem=EvidenceBoundClaim(
+                claim="Daily paper monitoring needs traceable recommendation context.",
+                evidence=supported,
+            ),
+            approach=EvidenceBoundClaim(
+                claim="The workflow stages retrieval, ranking, and briefing.",
+                evidence=supported,
+            ),
+            reading_guide=EvidenceBoundClaim(
+                claim="Read first for the workflow shape and evidence labels.",
+                evidence=supported,
+            ),
+        ),
+        PaperBriefingItem(
+            paper_id=metadata_paper.paper_id,
+            title=metadata_paper.title,
+            rank=2,
+            score=4.0,
+            summary="Only metadata was available for this paper.",
+            relevance_rationale="Matched metadata and ranking signals.",
+            evidence_source=EvidenceSource.METADATA,
+            provenance=metadata_paper.provenance,
+            arxiv_url=metadata_paper.arxiv_url,
+            problem=EvidenceBoundClaim(claim=None, evidence=metadata_limited),
+            approach=EvidenceBoundClaim(claim=None, evidence=metadata_limited),
+            reading_guide=EvidenceBoundClaim(
+                claim="Treat this as a lead until abstract or full text is checked.",
+                evidence=FieldEvidenceStatus(
+                    status=EvidenceSupportStatus.PARTIAL,
+                    sources=[EvidenceSource.METADATA, EvidenceSource.RANKING],
+                    note="Reading guidance uses metadata and ranking context.",
+                ),
+            ),
+        ),
+    ]
+    trend_signals = []
+    trend_summary = None
+    trend_limitations = ["Candidate-pool trend analysis was not assessed."]
+    if trend_status == TrendAssessmentStatus.AVAILABLE:
+        trend_summary = "Agent workflow appears across candidate abstracts."
+        trend_limitations = []
+        trend_signals = [
+            TrendSignal(
+                label="agent workflow",
+                signal_type=TrendSignalType.HOTSPOT,
+                strength=TrendSignalStrength.MODERATE,
+                support_count=4,
+                candidate_count=6,
+                top_k_count=1,
+                evidence_sources=[
+                    EvidenceSource.CANDIDATE_POOL,
+                    EvidenceSource.ABSTRACT,
+                ],
+                summary="Repeated across abstracts and titles.",
+            ),
+            TrendSignal(
+                label="cs.LG",
+                signal_type=TrendSignalType.CATEGORY,
+                strength=TrendSignalStrength.WEAK,
+                support_count=3,
+                candidate_count=6,
+                top_k_count=0,
+                evidence_sources=[EvidenceSource.CANDIDATE_POOL],
+                summary="Category signal did not appear in Top-K.",
+            )
+        ]
+    return DailyBriefing(
+        topic="agent briefing",
+        executive_summary="Top papers emphasize traceable agent briefing workflows.",
+        summary_table=[
+            BriefingTableRow(
+                rank=item.rank,
+                paper_id=item.paper_id,
+                title=item.title,
+                score=item.score,
+                key_reason=item.relevance_rationale,
+                evidence_source=item.evidence_source,
+                arxiv_url=item.arxiv_url,
+            )
+            for item in items
+        ],
+        highlighted_paper=items[0],
+        items=items,
+        evidence_source=EvidenceSource.MIXED,
+        trend_overview=CandidatePoolTrendOverview(
+            status=trend_status,
+            summary=trend_summary,
+            candidate_count=6 if trend_status == TrendAssessmentStatus.AVAILABLE else 0,
+            abstract_count=5 if trend_status == TrendAssessmentStatus.AVAILABLE else 0,
+            metadata_only_count=1 if trend_status == TrendAssessmentStatus.AVAILABLE else 0,
+            top_k_count=2 if trend_status == TrendAssessmentStatus.AVAILABLE else 0,
+            signals=trend_signals,
+            limitations=trend_limitations,
+            evidence_sources=[EvidenceSource.CANDIDATE_POOL]
+            if trend_status == TrendAssessmentStatus.AVAILABLE
+            else [],
+        ),
+        top_k_comparisons=[
+            TopKComparisonNote(
+                dimension="evidence coverage",
+                note="Rank 1 is abstract-backed while rank 2 is metadata-limited.",
+                paper_ids=[item.paper_id for item in items],
+                ranks=[item.rank for item in items],
+                evidence=FieldEvidenceStatus(
+                    status=EvidenceSupportStatus.SUPPORTED,
+                    sources=[EvidenceSource.RANKING, EvidenceSource.ABSTRACT],
+                ),
+            )
+        ],
+        reading_priorities=[
+            ReadingPriority(
+                priority=1,
+                reading_intent="start with abstract-backed workflow evidence",
+                paper_id=items[0].paper_id,
+                rank=1,
+                reason="It has the strongest score and abstract support.",
+                evidence=FieldEvidenceStatus(
+                    status=EvidenceSupportStatus.SUPPORTED,
+                    sources=[EvidenceSource.RANKING, EvidenceSource.ABSTRACT],
+                ),
+            )
+        ],
+        evidence_boundary=BriefingEvidenceBoundary(
+            evidence_sources=[
+                EvidenceSource.METADATA,
+                EvidenceSource.ABSTRACT,
+                EvidenceSource.RANKING,
+                EvidenceSource.CANDIDATE_POOL,
+            ],
+            unavailable_sources=[EvidenceSource.FULL_TEXT],
+            full_text_used=False,
+            notes=["No PDF or full-text evidence was used."],
+            abstentions=[
+                EvidenceBoundClaim(
+                    claim=None,
+                    evidence=FieldEvidenceStatus(
+                        status=EvidenceSupportStatus.UNAVAILABLE,
+                        abstention_reason=(
+                            "PDF and full-text evidence were not used in the default briefing."
+                        ),
+                    ),
+                )
+            ],
+        ),
+    )
+
+
 def test_streamlit_app_import_has_no_live_provider_side_effect(monkeypatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     monkeypatch.delenv("LLM_API_KEY", raising=False)
@@ -97,6 +292,70 @@ def test_recommendation_rows_render_structured_objects() -> None:
             "arxiv_url": "https://arxiv.org/abs/2604.00001",
         }
     ]
+
+
+def test_briefing_rows_keep_legacy_summary_table_columns() -> None:
+    briefing = make_enhanced_briefing(trend_status=TrendAssessmentStatus.AVAILABLE)
+
+    rows = briefing_rows(briefing)
+
+    assert list(rows[0]) == [
+        "rank",
+        "paper_id",
+        "title",
+        "score",
+        "evidence",
+        "key_reason",
+        "arxiv_url",
+    ]
+    assert rows[0]["paper_id"] == "2604.00001"
+    assert rows[0]["evidence"] == "abstract"
+
+
+def test_enhanced_briefing_sections_follow_required_order() -> None:
+    briefing = make_enhanced_briefing(trend_status=TrendAssessmentStatus.AVAILABLE)
+
+    sections = enhanced_briefing_sections(briefing)
+
+    assert [section["key"] for section in sections] == [
+        "executive_summary",
+        "top_k_reading_guide",
+        "trend_hotspot_overview",
+        "top_k_comparison",
+        "reading_priorities",
+        "evidence_boundary",
+    ]
+    guide = sections[1]
+    assert guide["summary_rows"][0]["paper_id"] == "2604.00001"
+    assert guide["paper_briefs"][0]["problem"].startswith("Daily paper monitoring")
+    assert sections[2]["signals"][0]["label"] == "agent workflow"
+    assert sections[2]["signals"][1]["top_k_count"] == 0
+    assert sections[3]["rows"][0]["dimension"] == "evidence coverage"
+    assert sections[4]["rows"][0]["reading_intent"] == (
+        "start with abstract-backed workflow evidence"
+    )
+    assert sections[5]["full_text_used"] == "no"
+    assert "full_text" in sections[5]["unavailable_sources"]
+
+
+def test_enhanced_briefing_sections_render_metadata_limited_and_unassessed_trends() -> None:
+    briefing = make_enhanced_briefing(trend_status=TrendAssessmentStatus.NOT_ASSESSED)
+
+    sections = enhanced_briefing_sections(briefing)
+
+    guide = sections[1]
+    metadata_brief = guide["paper_briefs"][1]
+    assert "No abstract is available" in metadata_brief["problem"]
+    assert "metadata and ranking context" in metadata_brief["reading_guide"]
+
+    trend = sections[2]
+    assert trend["status"] == "not_assessed"
+    assert trend["signals"] == []
+    assert "not assessed" in trend["summary"]
+
+    boundary = sections[5]
+    assert boundary["full_text_used"] == "no"
+    assert any("PDF and full-text evidence" in note for note in boundary["abstentions"])
 
 
 def test_workflow_trace_rows_render_evidence_and_fallback_details() -> None:

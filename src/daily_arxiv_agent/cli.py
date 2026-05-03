@@ -49,7 +49,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = _run_followup(args)
     else:  # pragma: no cover - argparse prevents this branch.
         parser.error(f"Unknown command: {args.command}")
-    print(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+    if getattr(args, "output_format", "json") == "briefing":
+        print(compact_briefing_output(result))
+    else:
+        print(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
     return _exit_code_for_status(result.status)
 
 
@@ -103,6 +106,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--debug-trace",
         action="store_true",
         help="Include raw query variants and planner rationale in trace metadata.",
+    )
+    demo.add_argument(
+        "--format",
+        choices=["json", "briefing"],
+        default="json",
+        dest="output_format",
+        help=(
+            "Output full workflow JSON for automation or a compact human-readable "
+            "daily briefing."
+        ),
     )
     demo.add_argument("--no-cache", action="store_true")
 
@@ -189,6 +202,147 @@ def _exit_code_for_status(status: SkillStatus) -> int:
     if status in {SkillStatus.SUCCESS, SkillStatus.EMPTY}:
         return 0
     return 1
+
+
+def compact_briefing_output(result: Any) -> str:
+    """Render a concise human-readable briefing without trace internals."""
+
+    workflow = getattr(result, "data", None)
+    briefing = getattr(workflow, "briefing", None)
+    lines = [f"Status: {result.status.value}"]
+    if result.message:
+        lines.append(f"Notice: {result.message}")
+    if result.error is not None:
+        lines.append(f"Fallback: {result.error.code}: {result.error.message}")
+    if briefing is None:
+        lines.append("")
+        lines.append("No daily briefing was produced.")
+        return "\n".join(lines)
+
+    for section in _briefing_sections(briefing):
+        lines.append("")
+        lines.append(f"## {section['title']}")
+        key = section["key"]
+        if key == "executive_summary":
+            lines.append(str(section["body"]))
+        elif key == "top_k_reading_guide":
+            lines.extend(_format_top_k_section(section))
+        elif key == "trend_hotspot_overview":
+            lines.extend(_format_trend_section(section))
+        elif key == "top_k_comparison":
+            lines.extend(_format_row_section(section["rows"], ["dimension", "note", "evidence"]))
+        elif key == "reading_priorities":
+            lines.extend(
+                _format_row_section(
+                    section["rows"],
+                    ["priority", "reading_intent", "paper_id", "rank", "reason"],
+                )
+            )
+        elif key == "evidence_boundary":
+            lines.extend(_format_boundary_section(section))
+    return "\n".join(lines)
+
+
+def _briefing_sections(briefing: Any) -> list[dict[str, object]]:
+    from daily_arxiv_agent.ui.streamlit_app import enhanced_briefing_sections
+
+    return enhanced_briefing_sections(briefing)
+
+
+def _format_top_k_section(section: dict[str, object]) -> list[str]:
+    lines: list[str] = []
+    summary_rows = section["summary_rows"]
+    lines.extend(
+        _format_row_section(
+            summary_rows,
+            ["rank", "paper_id", "title", "score", "evidence", "key_reason"],
+        )
+    )
+    paper_briefs = section["paper_briefs"]
+    for brief in paper_briefs:
+        lines.append("")
+        lines.append(f"### Rank {brief['rank']}: {brief['title']}")
+        lines.append(
+            f"Paper ID: {brief['paper_id']} | Score: {brief['score']} | "
+            f"Evidence: {brief['evidence']}"
+        )
+        lines.append(f"Summary: {brief['summary']}")
+        _append_optional_line(lines, "Problem", brief["problem"])
+        _append_optional_line(lines, "Approach", brief["approach"])
+        _append_optional_line(lines, "Reading guide", brief["reading_guide"])
+        _append_optional_line(lines, "Contributions", brief["contributions"])
+        _append_optional_line(lines, "Methods", brief["methods"])
+        lines.append(f"Relevance: {brief['relevance_rationale']}")
+    return lines
+
+
+def _format_trend_section(section: dict[str, object]) -> list[str]:
+    lines = [
+        str(section["summary"]),
+        (
+            f"Status: {section['status']} | Candidates: {section['candidate_count']} | "
+            f"Abstract-backed: {section['abstract_count']} | "
+            f"Metadata-only: {section['metadata_only_count']} | "
+            f"Top-K: {section['top_k_count']}"
+        ),
+    ]
+    signals = section["signals"]
+    if signals:
+        lines.extend(
+            _format_row_section(
+                signals,
+                ["label", "type", "strength", "support_count", "top_k_count", "query_echo"],
+            )
+        )
+    else:
+        limitations = section["limitations"]
+        if limitations:
+            lines.append("Limitations: " + "; ".join(str(item) for item in limitations))
+        else:
+            lines.append("No hotspot table was available for this run.")
+    return lines
+
+
+def _format_boundary_section(section: dict[str, object]) -> list[str]:
+    lines = [
+        f"Full text used: {section['full_text_used']}",
+        f"Evidence sources: {section['evidence_sources']}",
+        f"Unavailable sources: {section['unavailable_sources']}",
+    ]
+    notes = section["notes"]
+    if notes:
+        lines.append("Notes: " + "; ".join(str(note) for note in notes))
+    abstentions = section["abstentions"]
+    if abstentions:
+        lines.append("Abstentions: " + "; ".join(str(note) for note in abstentions))
+    return lines
+
+
+def _format_row_section(rows: object, columns: list[str]) -> list[str]:
+    if not rows:
+        return ["No rows available."]
+    normalized_rows = [row for row in rows if isinstance(row, dict)]
+    if not normalized_rows:
+        return ["No rows available."]
+    header = "| " + " | ".join(columns) + " |"
+    divider = "| " + " | ".join("---" for _ in columns) + " |"
+    body = [
+        "| "
+        + " | ".join(_cell_text(row.get(column, "")) for column in columns)
+        + " |"
+        for row in normalized_rows
+    ]
+    return [header, divider, *body]
+
+
+def _append_optional_line(lines: list[str], label: str, value: object) -> None:
+    text = _cell_text(value)
+    if text:
+        lines.append(f"{label}: {text}")
+
+
+def _cell_text(value: object) -> str:
+    return " ".join(str(value or "").replace("|", "/").split())
 
 
 if __name__ == "__main__":  # pragma: no cover

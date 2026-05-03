@@ -793,6 +793,15 @@ def test_cli_demo_runs_fixture_backed_workflow_end_to_end(
     assert payload["data"]["query"]["page_size"] == 10
     assert payload["data"]["query"]["max_requests"] == 2
     assert len(payload["data"]["recommendations"]) == 2
+    briefing = payload["data"]["briefing"]
+    assert briefing["trend_overview"]["status"] in {
+        "available",
+        "limited",
+        "insufficient_candidate_data",
+    }
+    assert "top_k_comparisons" in briefing
+    assert "reading_priorities" in briefing
+    assert briefing["evidence_boundary"]["full_text_used"] is False
 
 
 def test_default_orchestrator_uses_arxiv_delay_from_env(

@@ -152,7 +152,7 @@ flowchart TD
 **Verification:**
 - Contract tests prove new fields are structured, optional where needed, and compatible with current briefing outputs.
 
-- [ ] **Unit 2: Candidate-Pool Trend Analysis**
+- [x] **Unit 2: Candidate-Pool Trend Analysis**
 
 **Goal:** Build deterministic, offline-testable trend and hotspot signals from retrieved candidates, ranking context, and evidence coverage.
 

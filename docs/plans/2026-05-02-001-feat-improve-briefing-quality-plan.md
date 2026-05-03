@@ -324,7 +324,7 @@ flowchart TD
 **Verification:**
 - UI smoke tests, CLI tests, and orchestrator integration tests prove enhanced sections are present and existing summary outputs are not regressed.
 
-- [ ] **Unit 6: Briefing Quality Evaluation Hooks**
+- [x] **Unit 6: Briefing Quality Evaluation Hooks**
 
 **Goal:** Add deterministic checks and documentation that prove the enhanced briefing is materially richer than the MVP output while staying evidence-bounded.
 

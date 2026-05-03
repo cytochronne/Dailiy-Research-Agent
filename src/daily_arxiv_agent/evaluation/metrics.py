@@ -6,21 +6,29 @@ feedback, and explanation outputs without introducing a benchmark framework.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from daily_arxiv_agent.contracts import (
+    BriefingEvidenceBoundary,
+    DailyBriefing,
+    EvidenceBoundClaim,
     EvidenceSource,
+    EvidenceSupportStatus,
     ExplanationMode,
+    FieldEvidenceStatus,
     PaperDeepExplanation,
+    PaperBriefingItem,
     PaperMetadata,
     Recommendation,
     SkillError,
     SkillResult,
     SkillStatus,
+    TrendAssessmentStatus,
 )
 
 
@@ -101,6 +109,35 @@ class ExplanationCompleteness(BaseModel):
     is_complete: bool = False
 
 
+class BriefingQualityEvaluation(BaseModel):
+    """Deterministic quality checks for an enhanced daily briefing."""
+
+    required_sections: list[str] = Field(default_factory=list)
+    present_sections: list[str] = Field(default_factory=list)
+    missing_sections: list[str] = Field(default_factory=list)
+    section_coverage: float = 0.0
+    expected_top_k_paper_ids: list[str] = Field(default_factory=list)
+    briefed_top_k_paper_ids: list[str] = Field(default_factory=list)
+    missing_top_k_paper_ids: list[str] = Field(default_factory=list)
+    top_k_coverage: float = 0.0
+    candidate_count: int = 0
+    trend_status: TrendAssessmentStatus = TrendAssessmentStatus.NOT_ASSESSED
+    trend_signal_coverage: float | None = None
+    reading_priority_present: bool = False
+    reading_priority_count: int = 0
+    evidence_boundary_present: bool = False
+    claim_count: int = 0
+    supported_claim_count: int = 0
+    unsupported_claim_locations: list[str] = Field(default_factory=list)
+    claim_support_coverage: float = 0.0
+    specific_claim_count: int = 0
+    generic_claim_locations: list[str] = Field(default_factory=list)
+    claim_specificity_score: float = 0.0
+    forbidden_evidence_claims: list[str] = Field(default_factory=list)
+    failure_reasons: list[str] = Field(default_factory=list)
+    quality_passed: bool = False
+
+
 class RecommendationEvaluationFixture(BaseModel):
     """Fixture shape used by docs or tests to evaluate ranked outputs."""
 
@@ -124,6 +161,14 @@ class _RecommendationRef:
     paper_id: str
     rank: int
     score: float | None = None
+
+
+@dataclass(frozen=True)
+class _BriefingClaimRef:
+    location: str
+    text: str
+    evidence: FieldEvidenceStatus | None = None
+    evidence_source: EvidenceSource | None = None
 
 
 _DEFAULT_REQUIRED_SECTIONS: dict[ExplanationMode, tuple[str, ...]] = {
@@ -154,6 +199,108 @@ _DEFAULT_REQUIRED_SECTIONS: dict[ExplanationMode, tuple[str, ...]] = {
         "limitations.risks",
     ),
 }
+
+_DEFAULT_BRIEFING_REQUIRED_SECTIONS: tuple[str, ...] = (
+    "executive_summary",
+    "summary_table",
+    "items",
+    "trend_overview",
+    "top_k_comparisons",
+    "reading_priorities",
+    "evidence_boundary",
+)
+
+_CLAIM_SUPPORT_THRESHOLD = 0.8
+_CLAIM_SPECIFICITY_THRESHOLD = 0.6
+
+_GENERIC_CLAIM_TERMS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "because",
+    "both",
+    "by",
+    "can",
+    "claim",
+    "claims",
+    "contribution",
+    "contributions",
+    "detail",
+    "details",
+    "evidence",
+    "field",
+    "fields",
+    "first",
+    "for",
+    "from",
+    "good",
+    "has",
+    "have",
+    "important",
+    "in",
+    "interesting",
+    "is",
+    "it",
+    "method",
+    "methods",
+    "new",
+    "novel",
+    "of",
+    "on",
+    "paper",
+    "papers",
+    "rank",
+    "ranked",
+    "read",
+    "relevant",
+    "research",
+    "result",
+    "results",
+    "score",
+    "significant",
+    "study",
+    "support",
+    "supported",
+    "the",
+    "this",
+    "to",
+    "top",
+    "topic",
+    "useful",
+    "uses",
+    "with",
+    "work",
+}
+
+_FULL_TEXT_TERMS = re.compile(r"\b(?:pdf|full[- ]?text|fulltext)\b", re.IGNORECASE)
+_FULL_TEXT_EVIDENCE_TERMS = re.compile(
+    r"\b(?:analysis|analyzed|based|evidence|from|parsed|reviewed|"
+    r"shows|source|used|verified)\b",
+    re.IGNORECASE,
+)
+_FULL_TEXT_NEGATIONS = (
+    "no pdf",
+    "no full text",
+    "no full-text",
+    "not used",
+    "not use",
+    "were not used",
+    "was not used",
+    "did not use",
+    "does not use",
+    "without pdf",
+    "without full text",
+    "without full-text",
+    "unavailable",
+    "not available",
+    "not assessed",
+    "until abstract or full text is checked",
+    "until abstract or full-text is checked",
+)
 
 
 def evaluate_recommendations(
@@ -528,11 +675,502 @@ def check_explanation_completeness(
     )
 
 
+def evaluate_briefing_quality(
+    briefing: DailyBriefing | Mapping[str, Any],
+    *,
+    expected_top_k_paper_ids: Sequence[str] = (),
+    default_mode: bool = True,
+    required_sections: Sequence[str] | None = None,
+) -> SkillResult[BriefingQualityEvaluation]:
+    """Evaluate enhanced briefing richness and evidence-boundary discipline."""
+
+    try:
+        normalized = (
+            briefing
+            if isinstance(briefing, DailyBriefing)
+            else DailyBriefing.model_validate(briefing)
+        )
+        expected_ids = _normalize_optional_ids(
+            expected_top_k_paper_ids,
+            label="expected_top_k_paper_ids",
+        )
+    except ValidationError as exc:
+        return _validation_error(
+            _format_validation_error(exc),
+            code="evaluation_fixture_invalid",
+        )
+    except ValueError as exc:
+        return _validation_error(str(exc))
+
+    required = list(required_sections or _DEFAULT_BRIEFING_REQUIRED_SECTIONS)
+    if not required:
+        return _validation_error("required_sections must include at least one section")
+
+    present = [
+        section
+        for section in required
+        if _briefing_section_present(normalized, section)
+    ]
+    missing = [section for section in required if section not in present]
+    section_coverage = len(present) / len(required)
+
+    expected_top_k_ids = expected_ids or _expected_top_k_ids_from_briefing(normalized)
+    items_by_id = {item.paper_id: item for item in normalized.items}
+    briefed_top_k_ids = [
+        paper_id for paper_id in expected_top_k_ids if paper_id in items_by_id
+    ]
+    missing_top_k_ids = [
+        paper_id for paper_id in expected_top_k_ids if paper_id not in items_by_id
+    ]
+    top_k_coverage = (
+        len(briefed_top_k_ids) / len(expected_top_k_ids)
+        if expected_top_k_ids
+        else 0.0
+    )
+
+    trend_signal_coverage = _trend_signal_coverage(normalized)
+    claims = _briefing_claims(normalized)
+    unsupported_locations = [
+        claim.location
+        for claim in claims
+        if not _claim_has_allowed_support(claim, default_mode=default_mode)
+    ]
+    supported_claim_count = len(claims) - len(unsupported_locations)
+    claim_support_coverage = supported_claim_count / len(claims) if claims else 0.0
+
+    generic_locations = [
+        claim.location for claim in claims if not _is_specific_claim(claim.text)
+    ]
+    specific_claim_count = len(claims) - len(generic_locations)
+    claim_specificity_score = specific_claim_count / len(claims) if claims else 0.0
+
+    evidence_boundary_present = _evidence_boundary_present(
+        normalized.evidence_boundary
+    )
+    forbidden_evidence_claims = _forbidden_evidence_claims(
+        normalized,
+        default_mode=default_mode,
+    )
+    reading_priority_present = bool(normalized.reading_priorities)
+
+    failure_reasons = _briefing_quality_failures(
+        missing_sections=missing,
+        top_k_coverage=top_k_coverage,
+        trend_signal_coverage=trend_signal_coverage,
+        trend_status=normalized.trend_overview.status,
+        reading_priority_present=reading_priority_present,
+        evidence_boundary_present=evidence_boundary_present,
+        claim_support_coverage=claim_support_coverage,
+        claim_specificity_score=claim_specificity_score,
+        forbidden_evidence_claims=forbidden_evidence_claims,
+        default_mode=default_mode,
+    )
+    data = BriefingQualityEvaluation(
+        required_sections=required,
+        present_sections=present,
+        missing_sections=missing,
+        section_coverage=round(section_coverage, 4),
+        expected_top_k_paper_ids=expected_top_k_ids,
+        briefed_top_k_paper_ids=briefed_top_k_ids,
+        missing_top_k_paper_ids=missing_top_k_ids,
+        top_k_coverage=round(top_k_coverage, 4),
+        candidate_count=normalized.trend_overview.candidate_count,
+        trend_status=normalized.trend_overview.status,
+        trend_signal_coverage=(
+            round(trend_signal_coverage, 4)
+            if trend_signal_coverage is not None
+            else None
+        ),
+        reading_priority_present=reading_priority_present,
+        reading_priority_count=len(normalized.reading_priorities),
+        evidence_boundary_present=evidence_boundary_present,
+        claim_count=len(claims),
+        supported_claim_count=supported_claim_count,
+        unsupported_claim_locations=unsupported_locations,
+        claim_support_coverage=round(claim_support_coverage, 4),
+        specific_claim_count=specific_claim_count,
+        generic_claim_locations=generic_locations,
+        claim_specificity_score=round(claim_specificity_score, 4),
+        forbidden_evidence_claims=forbidden_evidence_claims,
+        failure_reasons=failure_reasons,
+        quality_passed=not failure_reasons,
+    )
+    return SkillResult[BriefingQualityEvaluation](
+        status=SkillStatus.SUCCESS,
+        data=data,
+        evidence_source=normalized.evidence_source or EvidenceSource.MIXED,
+        message=(
+            "Enhanced briefing quality checks passed."
+            if data.quality_passed
+            else "Enhanced briefing quality checks failed: "
+            + ", ".join(failure_reasons)
+        ),
+        provenance=normalized.provenance,
+        metadata={
+            "topic": normalized.topic,
+            "item_count": len(normalized.items),
+            "candidate_count": normalized.trend_overview.candidate_count,
+            "trend_status": normalized.trend_overview.status.value,
+            "quality_passed": data.quality_passed,
+        },
+    )
+
+
+def _briefing_section_present(briefing: DailyBriefing, section: str) -> bool:
+    if section == "evidence_boundary":
+        return _evidence_boundary_present(briefing.evidence_boundary)
+    if section == "trend_overview":
+        return briefing.trend_overview.status is not None
+    return _has_present_value(briefing, section)
+
+
+def _evidence_boundary_present(boundary: BriefingEvidenceBoundary) -> bool:
+    return bool(
+        boundary.evidence_sources
+        or boundary.unavailable_sources
+        or boundary.notes
+        or boundary.abstentions
+        or boundary.full_text_used
+    )
+
+
+def _expected_top_k_ids_from_briefing(briefing: DailyBriefing) -> list[str]:
+    table_ids = _dedupe_preserve(
+        row.paper_id for row in sorted(briefing.summary_table, key=lambda row: row.rank)
+    )
+    if table_ids:
+        return table_ids
+    return _dedupe_preserve(
+        item.paper_id for item in sorted(briefing.items, key=lambda item: item.rank)
+    )
+
+
+def _trend_signal_coverage(briefing: DailyBriefing) -> float | None:
+    overview = briefing.trend_overview
+    if overview.status != TrendAssessmentStatus.AVAILABLE:
+        return None
+    if not overview.signals:
+        return 0.0
+    supported = [
+        signal
+        for signal in overview.signals
+        if signal.support_count > 0 and signal.evidence_sources
+    ]
+    return len(supported) / len(overview.signals)
+
+
+def _briefing_claims(briefing: DailyBriefing) -> list[_BriefingClaimRef]:
+    claims = [
+        _BriefingClaimRef(
+            location="executive_summary",
+            text=briefing.executive_summary,
+            evidence_source=briefing.evidence_source or EvidenceSource.MIXED,
+        )
+    ]
+    for index, item in enumerate(sorted(briefing.items, key=lambda item: item.rank)):
+        claims.extend(_item_claims(item, index=index))
+    for index, comparison in enumerate(briefing.top_k_comparisons):
+        claims.append(
+            _BriefingClaimRef(
+                location=f"top_k_comparisons[{index}].note",
+                text=f"{comparison.dimension}. {comparison.note}",
+                evidence=comparison.evidence,
+            )
+        )
+    for index, priority in enumerate(briefing.reading_priorities):
+        claims.append(
+            _BriefingClaimRef(
+                location=f"reading_priorities[{index}].reason",
+                text=f"{priority.reading_intent}. {priority.reason}",
+                evidence=priority.evidence,
+            )
+        )
+    overview = briefing.trend_overview
+    if overview.summary:
+        claims.append(
+            _BriefingClaimRef(
+                location="trend_overview.summary",
+                text=overview.summary,
+                evidence_source=EvidenceSource.CANDIDATE_POOL,
+            )
+        )
+    for index, signal in enumerate(overview.signals):
+        if signal.summary:
+            claims.append(
+                _BriefingClaimRef(
+                    location=f"trend_overview.signals[{index}].summary",
+                    text=f"{signal.label}. {signal.summary}",
+                    evidence_source=EvidenceSource.CANDIDATE_POOL,
+                )
+            )
+    return [claim for claim in claims if _is_present(claim.text)]
+
+
+def _item_claims(item: PaperBriefingItem, *, index: int) -> list[_BriefingClaimRef]:
+    prefix = f"items[{index}]"
+    claims = [
+        _BriefingClaimRef(
+            location=f"{prefix}.summary",
+            text=item.summary,
+            evidence_source=item.evidence_source,
+        ),
+        _BriefingClaimRef(
+            location=f"{prefix}.relevance_rationale",
+            text=item.relevance_rationale,
+            evidence=item.relevance_evidence,
+            evidence_source=item.evidence_source if item.relevance_evidence is None else None,
+        ),
+    ]
+    for field_name in ("problem", "approach", "reading_guide"):
+        claim = getattr(item, field_name)
+        claims.extend(_evidence_bound_claim_refs(f"{prefix}.{field_name}", claim))
+    for claim_index, contribution in enumerate(item.contributions):
+        claims.append(
+            _BriefingClaimRef(
+                location=f"{prefix}.contributions[{claim_index}]",
+                text=contribution,
+                evidence_source=item.evidence_source,
+            )
+        )
+    for claim_index, method in enumerate(item.methods):
+        claims.append(
+            _BriefingClaimRef(
+                location=f"{prefix}.methods[{claim_index}]",
+                text=method,
+                evidence_source=item.evidence_source,
+            )
+        )
+    for claim_index, claim in enumerate(item.contribution_claims):
+        claims.extend(
+            _evidence_bound_claim_refs(
+                f"{prefix}.contribution_claims[{claim_index}]",
+                claim,
+            )
+        )
+    for claim_index, claim in enumerate(item.method_claims):
+        claims.extend(
+            _evidence_bound_claim_refs(
+                f"{prefix}.method_claims[{claim_index}]",
+                claim,
+            )
+        )
+    return claims
+
+
+def _evidence_bound_claim_refs(
+    location: str,
+    claim: EvidenceBoundClaim | None,
+) -> list[_BriefingClaimRef]:
+    if claim is None or not claim.claim:
+        return []
+    return [
+        _BriefingClaimRef(
+            location=location,
+            text=claim.claim,
+            evidence=claim.evidence,
+        )
+    ]
+
+
+def _claim_has_allowed_support(
+    claim: _BriefingClaimRef,
+    *,
+    default_mode: bool,
+) -> bool:
+    if claim.evidence is not None:
+        supported = (
+            claim.evidence.status
+            in {EvidenceSupportStatus.SUPPORTED, EvidenceSupportStatus.PARTIAL}
+            and bool(claim.evidence.sources)
+        )
+        if not supported:
+            return False
+        return not (
+            default_mode and EvidenceSource.FULL_TEXT in set(claim.evidence.sources)
+        )
+    if claim.evidence_source is None:
+        return False
+    return not (default_mode and claim.evidence_source == EvidenceSource.FULL_TEXT)
+
+
+def _is_specific_claim(text: str) -> bool:
+    normalized = " ".join(text.lower().split())
+    if not normalized or _looks_vacuous(normalized):
+        return False
+    tokens = re.findall(r"[a-z0-9][a-z0-9.-]*", normalized)
+    meaningful = {
+        token
+        for token in tokens
+        if not token.isdigit()
+        and len(token) > 2
+        and token not in _GENERIC_CLAIM_TERMS
+    }
+    if len(meaningful) >= 4:
+        return True
+    return bool(re.search(r"\b\d{4}\.\d{4,5}\b", normalized))
+
+
+def _looks_vacuous(normalized: str) -> bool:
+    vacuous_patterns = (
+        "this paper is important",
+        "this paper is relevant",
+        "this paper proposes a useful approach",
+        "important problem",
+        "useful contribution",
+        "uses a method",
+        "good match",
+        "useful paper",
+        "read this paper first",
+        "both useful papers",
+    )
+    return any(pattern in normalized for pattern in vacuous_patterns)
+
+
+def _forbidden_evidence_claims(
+    briefing: DailyBriefing,
+    *,
+    default_mode: bool,
+) -> list[str]:
+    if not default_mode:
+        return []
+    violations: list[str] = []
+    boundary = briefing.evidence_boundary
+    if boundary.full_text_used:
+        violations.append("evidence_boundary.full_text_used")
+    if EvidenceSource.FULL_TEXT in set(boundary.evidence_sources):
+        violations.append("evidence_boundary.evidence_sources")
+    for index, item in enumerate(briefing.items):
+        if item.evidence_source == EvidenceSource.FULL_TEXT:
+            violations.append(f"items[{index}].evidence_source")
+    for claim in _briefing_claims(briefing):
+        if claim.evidence and EvidenceSource.FULL_TEXT in set(claim.evidence.sources):
+            violations.append(claim.location)
+    for location, text in _briefing_text_fields(briefing):
+        if _implies_full_text_evidence(text):
+            violations.append(location)
+    return _dedupe_preserve(violations)
+
+
+def _briefing_text_fields(briefing: DailyBriefing) -> list[tuple[str, str]]:
+    fields = [("executive_summary", briefing.executive_summary)]
+    for index, item in enumerate(briefing.items):
+        fields.extend(
+            [
+                (f"items[{index}].summary", item.summary),
+                (f"items[{index}].relevance_rationale", item.relevance_rationale),
+            ]
+        )
+        for field_name in ("problem", "approach", "reading_guide"):
+            claim = getattr(item, field_name)
+            if claim and claim.claim:
+                fields.append((f"items[{index}].{field_name}", claim.claim))
+        for claim_index, contribution in enumerate(item.contributions):
+            fields.append(
+                (f"items[{index}].contributions[{claim_index}]", contribution)
+            )
+        for claim_index, method in enumerate(item.methods):
+            fields.append((f"items[{index}].methods[{claim_index}]", method))
+        for claim_index, claim in enumerate(item.contribution_claims):
+            if claim.claim:
+                fields.append(
+                    (
+                        f"items[{index}].contribution_claims[{claim_index}]",
+                        claim.claim,
+                    )
+                )
+        for claim_index, claim in enumerate(item.method_claims):
+            if claim.claim:
+                fields.append(
+                    (f"items[{index}].method_claims[{claim_index}]", claim.claim)
+                )
+    for index, comparison in enumerate(briefing.top_k_comparisons):
+        fields.append((f"top_k_comparisons[{index}].note", comparison.note))
+    for index, priority in enumerate(briefing.reading_priorities):
+        fields.extend(
+            [
+                (
+                    f"reading_priorities[{index}].reading_intent",
+                    priority.reading_intent,
+                ),
+                (f"reading_priorities[{index}].reason", priority.reason),
+            ]
+        )
+    if briefing.trend_overview.summary:
+        fields.append(("trend_overview.summary", briefing.trend_overview.summary))
+    for index, signal in enumerate(briefing.trend_overview.signals):
+        if signal.summary:
+            fields.append((f"trend_overview.signals[{index}].summary", signal.summary))
+    for index, note in enumerate(briefing.evidence_boundary.notes):
+        fields.append((f"evidence_boundary.notes[{index}]", note))
+    for index, abstention in enumerate(briefing.evidence_boundary.abstentions):
+        reason = abstention.evidence.abstention_reason or abstention.evidence.note
+        if reason:
+            fields.append((f"evidence_boundary.abstentions[{index}]", reason))
+    return fields
+
+
+def _implies_full_text_evidence(text: str) -> bool:
+    if not _FULL_TEXT_TERMS.search(text):
+        return False
+    sentences = [
+        sentence.strip().lower()
+        for sentence in re.split(r"[.;!?]\s+", text)
+        if sentence.strip()
+    ]
+    for sentence in sentences:
+        if not _FULL_TEXT_TERMS.search(sentence):
+            continue
+        if any(negation in sentence for negation in _FULL_TEXT_NEGATIONS):
+            continue
+        if _FULL_TEXT_EVIDENCE_TERMS.search(sentence):
+            return True
+    return False
+
+
+def _briefing_quality_failures(
+    *,
+    missing_sections: Sequence[str],
+    top_k_coverage: float,
+    trend_signal_coverage: float | None,
+    trend_status: TrendAssessmentStatus,
+    reading_priority_present: bool,
+    evidence_boundary_present: bool,
+    claim_support_coverage: float,
+    claim_specificity_score: float,
+    forbidden_evidence_claims: Sequence[str],
+    default_mode: bool,
+) -> list[str]:
+    failures: list[str] = []
+    if missing_sections:
+        failures.append("required_sections_missing")
+    if "reading_priorities" in missing_sections or not reading_priority_present:
+        failures.append("reading_priorities_missing")
+    if "evidence_boundary" in missing_sections or not evidence_boundary_present:
+        failures.append("evidence_boundary_missing")
+    if top_k_coverage < 1.0:
+        failures.append("top_k_coverage_incomplete")
+    if trend_status == TrendAssessmentStatus.AVAILABLE and trend_signal_coverage == 0.0:
+        failures.append("trend_signals_missing")
+    if claim_support_coverage < _CLAIM_SUPPORT_THRESHOLD:
+        failures.append("claim_support_low")
+    if claim_specificity_score < _CLAIM_SPECIFICITY_THRESHOLD:
+        failures.append("claim_specificity_low")
+    if default_mode and forbidden_evidence_claims:
+        failures.append("default_mode_full_text_used")
+    return _dedupe_preserve(failures)
+
+
 def _normalize_expected_ids(values: Sequence[str]) -> list[str]:
     expected = _dedupe_nonblank(values, label="expected_relevant_paper_ids")
     if not expected:
         raise ValueError("expected_relevant_paper_ids must include at least one ID")
     return expected
+
+
+def _normalize_optional_ids(values: Sequence[str], *, label: str) -> list[str]:
+    if not values:
+        return []
+    return _dedupe_nonblank(values, label=label)
 
 
 def _normalize_recommendations(
@@ -703,6 +1341,16 @@ def _dedupe_nonblank(values: Sequence[str], *, label: str) -> list[str]:
         if stripped not in seen:
             normalized.append(stripped)
             seen.add(stripped)
+    return normalized
+
+
+def _dedupe_preserve(values: Iterable[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value not in seen:
+            normalized.append(value)
+            seen.add(value)
     return normalized
 
 

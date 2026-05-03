@@ -3,20 +3,35 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from daily_arxiv_agent.contracts import (
+    BriefingEvidenceBoundary,
+    BriefingTableRow,
+    CandidatePoolTrendOverview,
+    DailyBriefing,
+    EvidenceBoundClaim,
     EvidenceSource,
+    EvidenceSupportStatus,
     ExplanationMode,
+    FieldEvidenceStatus,
     MethodExplanation,
     PaperDeepExplanation,
+    PaperBriefingItem,
     PaperMetadata,
     Provenance,
     QueryPlannerMode,
+    ReadingPriority,
     Recommendation,
     RetrievalQuery,
     SearchMode,
     SkillStatus,
+    TopKComparisonNote,
+    TrendAssessmentStatus,
+    TrendSignal,
+    TrendSignalStrength,
+    TrendSignalType,
 )
 from daily_arxiv_agent.evaluation.metrics import (
     check_explanation_completeness,
+    evaluate_briefing_quality,
     evaluate_feedback_movement,
     evaluate_recommendation_fixture,
     evaluate_recommendations,
@@ -156,6 +171,338 @@ def make_method_explanation() -> PaperDeepExplanation:
         ),
         provenance=paper.provenance,
         arxiv_url=paper.arxiv_url,
+    )
+
+
+def supported_evidence(*sources: EvidenceSource) -> FieldEvidenceStatus:
+    return FieldEvidenceStatus(
+        status=EvidenceSupportStatus.SUPPORTED,
+        sources=list(sources),
+    )
+
+
+def partial_evidence(*sources: EvidenceSource, note: str) -> FieldEvidenceStatus:
+    return FieldEvidenceStatus(
+        status=EvidenceSupportStatus.PARTIAL,
+        sources=list(sources),
+        note=note,
+    )
+
+
+def unavailable_evidence(reason: str) -> FieldEvidenceStatus:
+    return FieldEvidenceStatus(
+        status=EvidenceSupportStatus.UNAVAILABLE,
+        abstention_reason=reason,
+    )
+
+
+def make_briefing_paper(
+    paper_id: str,
+    title: str,
+    abstract: str | None,
+    *,
+    categories: list[str] | None = None,
+) -> PaperMetadata:
+    return PaperMetadata(
+        paper_id=paper_id,
+        title=title,
+        authors=["Ada Lovelace"],
+        abstract=abstract,
+        categories=categories or ["cs.LG"],
+        published_date=date(2026, 4, 20),
+        updated_date=date(2026, 4, 20),
+        arxiv_url=f"https://arxiv.org/abs/{paper_id}",
+        pdf_url=f"https://arxiv.org/pdf/{paper_id}",
+        provenance=Provenance(
+            source="arxiv",
+            source_url=f"https://arxiv.org/abs/{paper_id}",
+            query="briefing quality",
+        ),
+    )
+
+
+def make_briefing_item(
+    paper: PaperMetadata,
+    *,
+    rank: int,
+    score: float,
+    metadata_only: bool = False,
+) -> PaperBriefingItem:
+    if metadata_only:
+        limited = unavailable_evidence(
+            "No abstract is available to support this field."
+        )
+        return PaperBriefingItem(
+            paper_id=paper.paper_id,
+            title=paper.title,
+            rank=rank,
+            score=score,
+            summary="Only metadata was available for this ranked paper.",
+            relevance_rationale="Ranking matched title, category, and retrieval metadata.",
+            evidence_source=EvidenceSource.METADATA,
+            provenance=paper.provenance,
+            arxiv_url=paper.arxiv_url,
+            problem=EvidenceBoundClaim(claim=None, evidence=limited),
+            approach=EvidenceBoundClaim(claim=None, evidence=limited),
+            reading_guide=EvidenceBoundClaim(
+                claim=(
+                    "Treat this metadata-only result as a follow-up lead before "
+                    "making technical claims."
+                ),
+                evidence=partial_evidence(
+                    EvidenceSource.METADATA,
+                    EvidenceSource.RANKING,
+                    note="Reading guidance uses metadata and ranking context.",
+                ),
+            ),
+        )
+
+    supported = supported_evidence(EvidenceSource.ABSTRACT)
+    return PaperBriefingItem(
+        paper_id=paper.paper_id,
+        title=paper.title,
+        rank=rank,
+        score=score,
+        summary=(
+            "The paper studies multimodal agent workflows for robotic manipulation "
+            "and daily research triage."
+        ),
+        contributions=[
+            "Connects embodied planning signals to ranked research briefing guidance."
+        ],
+        methods=["Vision-language planning with closed-loop manipulation control."],
+        relevance_rationale=(
+            "Matched robotic manipulation, embodied control, and agent planning terms."
+        ),
+        evidence_source=EvidenceSource.ABSTRACT,
+        provenance=paper.provenance,
+        arxiv_url=paper.arxiv_url,
+        problem=EvidenceBoundClaim(
+            claim=(
+                "Robotic manipulation papers need triage that separates embodied "
+                "planning work from weak category-only matches."
+            ),
+            evidence=supported,
+        ),
+        approach=EvidenceBoundClaim(
+            claim=(
+                "The abstract frames vision-language planning and closed-loop "
+                "control as the core agent workflow."
+            ),
+            evidence=supported,
+        ),
+        reading_guide=EvidenceBoundClaim(
+            claim=(
+                "Read first for embodied-control agent design, then compare the "
+                "planning assumptions against the other Top-K papers."
+            ),
+            evidence=partial_evidence(
+                EvidenceSource.ABSTRACT,
+                EvidenceSource.RANKING,
+                note="Reading guidance combines abstract evidence with ranking context.",
+            ),
+        ),
+        contribution_claims=[
+            EvidenceBoundClaim(
+                claim=(
+                    "The contribution is specific to embodied manipulation and "
+                    "ranked agent-planning evidence."
+                ),
+                evidence=supported,
+            )
+        ],
+        method_claims=[
+            EvidenceBoundClaim(
+                claim=(
+                    "The method combines vision-language planning, robotic "
+                    "manipulation control, and agent feedback loops."
+                ),
+                evidence=supported,
+            )
+        ],
+        relevance_evidence=partial_evidence(
+            EvidenceSource.ABSTRACT,
+            EvidenceSource.RANKING,
+            note="Relevance combines abstract terms with ranking context.",
+        ),
+    )
+
+
+def make_quality_briefing(
+    *,
+    include_priorities: bool = True,
+    include_boundary: bool = True,
+    generic: bool = False,
+    full_text_claim: bool = False,
+    trend_status: TrendAssessmentStatus = TrendAssessmentStatus.AVAILABLE,
+    metadata_only: bool = False,
+) -> DailyBriefing:
+    paper = make_briefing_paper(
+        "2604.20001",
+        "Multimodal LLM Agents for Robotic Manipulation",
+        "We present multimodal LLM agents for robotic manipulation.",
+        categories=["cs.RO", "cs.AI"],
+    )
+    second = make_briefing_paper(
+        "2604.20002",
+        "Embodied Language Models for Dexterous Manipulation",
+        None if metadata_only else "Language model policies coordinate embodied control.",
+        categories=["cs.RO", "cs.LG"],
+    )
+    items = [
+        make_briefing_item(paper, rank=1, score=8.8),
+        make_briefing_item(
+            second,
+            rank=2,
+            score=7.4,
+            metadata_only=metadata_only,
+        ),
+    ]
+    if generic:
+        generic_status = supported_evidence(EvidenceSource.ABSTRACT)
+        for item in items:
+            item.summary = "This paper is important and relevant to the topic."
+            item.contributions = ["It has a useful contribution."]
+            item.methods = ["It uses a method."]
+            item.relevance_rationale = "This is a good match."
+            item.problem = EvidenceBoundClaim(
+                claim="This paper addresses an important problem.",
+                evidence=generic_status,
+            )
+            item.approach = EvidenceBoundClaim(
+                claim="This paper proposes a useful approach.",
+                evidence=generic_status,
+            )
+            item.reading_guide = EvidenceBoundClaim(
+                claim="Read this paper first because it is useful.",
+                evidence=generic_status,
+            )
+    trend_signals: list[TrendSignal] = []
+    trend_summary = None
+    trend_sources: list[EvidenceSource] = []
+    candidate_count = 0
+    abstract_count = 0
+    metadata_only_count = 0
+    if trend_status == TrendAssessmentStatus.AVAILABLE:
+        candidate_count = 6
+        abstract_count = 5
+        metadata_only_count = 1
+        trend_summary = "Robotic manipulation and embodied control recur in candidates."
+        trend_sources = [EvidenceSource.CANDIDATE_POOL, EvidenceSource.ABSTRACT]
+        trend_signals = [
+            TrendSignal(
+                label="robotic manipulation",
+                signal_type=TrendSignalType.HOTSPOT,
+                strength=TrendSignalStrength.MODERATE,
+                support_count=4,
+                candidate_count=6,
+                top_k_count=2,
+                evidence_sources=trend_sources,
+                summary="Repeated across exact and related candidate abstracts.",
+            )
+        ]
+
+    comparisons = [
+        TopKComparisonNote(
+            dimension="paper difference",
+            note=(
+                "Rank 1 emphasizes multimodal robotic manipulation, while rank 2 "
+                "focuses on embodied language-model control."
+            )
+            if not generic
+            else "Rank 1 and rank 2 are both useful papers.",
+            paper_ids=[item.paper_id for item in items],
+            ranks=[item.rank for item in items],
+            evidence=supported_evidence(EvidenceSource.ABSTRACT, EvidenceSource.RANKING),
+        )
+    ]
+    priorities = []
+    if include_priorities:
+        priorities = [
+            ReadingPriority(
+                priority=1,
+                reading_intent=(
+                    "start with embodied-control agent design"
+                    if not generic
+                    else "read this first"
+                ),
+                paper_id=items[0].paper_id,
+                rank=1,
+                reason=(
+                    "It has the strongest score and explicit abstract support for "
+                    "robotic manipulation agents."
+                    if not generic
+                    else "It is a useful paper."
+                ),
+                evidence=supported_evidence(EvidenceSource.ABSTRACT, EvidenceSource.RANKING),
+            )
+        ]
+    boundary = BriefingEvidenceBoundary()
+    if include_boundary:
+        boundary = BriefingEvidenceBoundary(
+            evidence_sources=[
+                EvidenceSource.METADATA,
+                EvidenceSource.ABSTRACT,
+                EvidenceSource.RANKING,
+                EvidenceSource.RETRIEVAL_METADATA,
+                EvidenceSource.CANDIDATE_POOL,
+            ],
+            unavailable_sources=[EvidenceSource.FULL_TEXT],
+            full_text_used=full_text_claim,
+            notes=[
+                "No PDF or full-text evidence was used."
+                if not full_text_claim
+                else "Full-text evidence was used to verify the method."
+            ],
+            abstentions=[
+                EvidenceBoundClaim(
+                    claim=None,
+                    evidence=unavailable_evidence(
+                        "PDF and full-text evidence were not used in the default briefing."
+                    ),
+                )
+            ],
+        )
+    return DailyBriefing(
+        topic="multimodal llm agents for robotic manipulation",
+        executive_summary=(
+            "Full-text evidence shows strong experimental support."
+            if full_text_claim
+            else "Top papers separate robotic manipulation agents from weak matches."
+        )
+        if not generic
+        else "These papers are useful and relevant.",
+        summary_table=[
+            BriefingTableRow(
+                rank=item.rank,
+                paper_id=item.paper_id,
+                title=item.title,
+                score=item.score,
+                key_reason=item.relevance_rationale,
+                evidence_source=item.evidence_source,
+                arxiv_url=item.arxiv_url,
+            )
+            for item in items
+        ],
+        highlighted_paper=items[0],
+        items=items,
+        evidence_source=EvidenceSource.MIXED,
+        trend_overview=CandidatePoolTrendOverview(
+            status=trend_status,
+            summary=trend_summary,
+            candidate_count=candidate_count,
+            abstract_count=abstract_count,
+            metadata_only_count=metadata_only_count,
+            top_k_count=len(items) if trend_status == TrendAssessmentStatus.AVAILABLE else 0,
+            signals=trend_signals,
+            limitations=[]
+            if trend_status == TrendAssessmentStatus.AVAILABLE
+            else ["Candidate-pool trend analysis was not assessed."],
+            evidence_sources=trend_sources,
+        ),
+        top_k_comparisons=comparisons,
+        reading_priorities=priorities,
+        evidence_boundary=boundary,
     )
 
 
@@ -509,3 +856,275 @@ def test_search_quality_rejects_empty_expected_relevance_set() -> None:
     assert result.error is not None
     assert result.error.code == "evaluation_input_invalid"
     assert "expected_relevant_paper_ids" in result.error.message
+
+
+def test_enhanced_briefing_quality_passes_specific_supported_sections() -> None:
+    briefing = make_quality_briefing()
+
+    result = evaluate_briefing_quality(
+        briefing,
+        expected_top_k_paper_ids=["2604.20001", "2604.20002"],
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    data = result.data
+    assert data is not None
+    assert data.quality_passed
+    assert data.missing_sections == []
+    assert data.top_k_coverage == 1.0
+    assert data.trend_status == TrendAssessmentStatus.AVAILABLE
+    assert data.trend_signal_coverage == 1.0
+    assert data.reading_priority_present
+    assert data.evidence_boundary_present
+    assert data.claim_support_coverage == 1.0
+    assert data.claim_specificity_score >= 0.6
+    assert data.generic_claim_locations == []
+    assert data.forbidden_evidence_claims == []
+
+
+def test_briefing_quality_accepts_top_k_when_trends_are_not_assessed() -> None:
+    briefing = make_quality_briefing(
+        trend_status=TrendAssessmentStatus.NOT_ASSESSED,
+    )
+
+    result = evaluate_briefing_quality(
+        briefing,
+        expected_top_k_paper_ids=["2604.20001", "2604.20002"],
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    data = result.data
+    assert data is not None
+    assert data.quality_passed
+    assert data.top_k_coverage == 1.0
+    assert data.trend_status == TrendAssessmentStatus.NOT_ASSESSED
+    assert data.trend_signal_coverage is None
+    assert "trend_overview" in data.present_sections
+
+
+def test_briefing_quality_identifies_missing_priorities_and_boundary() -> None:
+    briefing = make_quality_briefing(
+        include_priorities=False,
+        include_boundary=False,
+    )
+
+    result = evaluate_briefing_quality(
+        briefing,
+        expected_top_k_paper_ids=["2604.20001", "2604.20002"],
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    data = result.data
+    assert data is not None
+    assert not data.quality_passed
+    assert "reading_priorities" in data.missing_sections
+    assert "evidence_boundary" in data.missing_sections
+    assert "reading_priorities_missing" in data.failure_reasons
+    assert "evidence_boundary_missing" in data.failure_reasons
+
+
+def test_briefing_quality_fails_structurally_complete_generic_content() -> None:
+    briefing = make_quality_briefing(generic=True)
+
+    result = evaluate_briefing_quality(
+        briefing,
+        expected_top_k_paper_ids=["2604.20001", "2604.20002"],
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    data = result.data
+    assert data is not None
+    assert not data.quality_passed
+    assert data.missing_sections == []
+    assert data.claim_support_coverage == 1.0
+    assert data.claim_specificity_score < 0.6
+    assert data.generic_claim_locations
+    assert "claim_specificity_low" in data.failure_reasons
+
+
+def test_briefing_quality_flags_default_mode_full_text_claims() -> None:
+    briefing = make_quality_briefing(full_text_claim=True)
+    briefing.items[0].contributions = ["PDF analysis shows stronger evidence."]
+
+    result = evaluate_briefing_quality(
+        briefing,
+        expected_top_k_paper_ids=["2604.20001", "2604.20002"],
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    data = result.data
+    assert data is not None
+    assert not data.quality_passed
+    assert "default_mode_full_text_used" in data.failure_reasons
+    assert "evidence_boundary.full_text_used" in data.forbidden_evidence_claims
+    assert any(
+        location.startswith("executive_summary")
+        for location in data.forbidden_evidence_claims
+    )
+    assert "items[0].contributions[0]" in data.forbidden_evidence_claims
+
+
+def test_briefing_quality_accepts_metadata_only_boundary_when_abstracts_absent() -> None:
+    briefing = make_quality_briefing(
+        trend_status=TrendAssessmentStatus.NOT_ASSESSED,
+        metadata_only=True,
+    )
+    metadata_sources = [EvidenceSource.METADATA, EvidenceSource.RANKING]
+    briefing.evidence_boundary = BriefingEvidenceBoundary(
+        evidence_sources=metadata_sources,
+        unavailable_sources=[EvidenceSource.ABSTRACT, EvidenceSource.FULL_TEXT],
+        full_text_used=False,
+        notes=["Only metadata and ranking evidence were available."],
+        abstentions=[
+            EvidenceBoundClaim(
+                claim=None,
+                evidence=unavailable_evidence(
+                    "Abstracts and PDF full text were unavailable for default briefing."
+                ),
+            )
+        ],
+    )
+    for item in briefing.items:
+        item.evidence_source = EvidenceSource.METADATA
+        unavailable = unavailable_evidence("No abstract is available.")
+        item.problem = EvidenceBoundClaim(claim=None, evidence=unavailable)
+        item.approach = EvidenceBoundClaim(claim=None, evidence=unavailable)
+    briefing.summary_table = [
+        BriefingTableRow(
+            rank=item.rank,
+            paper_id=item.paper_id,
+            title=item.title,
+            score=item.score,
+            key_reason=item.relevance_rationale,
+            evidence_source=EvidenceSource.METADATA,
+            arxiv_url=item.arxiv_url,
+        )
+        for item in briefing.items
+    ]
+    briefing.top_k_comparisons = [
+        TopKComparisonNote(
+            dimension="metadata title difference",
+            note=(
+                "Rank 1 title emphasizes multimodal robotic manipulation, while "
+                "rank 2 title emphasizes embodied language models."
+            ),
+            paper_ids=[item.paper_id for item in briefing.items],
+            ranks=[item.rank for item in briefing.items],
+            evidence=partial_evidence(
+                EvidenceSource.METADATA,
+                EvidenceSource.RANKING,
+                note="Comparison is limited to titles and ranking context.",
+            ),
+        )
+    ]
+    briefing.reading_priorities = [
+        ReadingPriority(
+            priority=1,
+            reading_intent="start with metadata-backed robotic manipulation lead",
+            paper_id=briefing.items[0].paper_id,
+            rank=1,
+            reason=(
+                "The title has the closest robotic manipulation match, but "
+                "technical claims require abstract or full-text follow-up."
+            ),
+            evidence=partial_evidence(
+                EvidenceSource.METADATA,
+                EvidenceSource.RANKING,
+                note="Priority is limited to title metadata and rank.",
+            ),
+        )
+    ]
+
+    result = evaluate_briefing_quality(
+        briefing,
+        expected_top_k_paper_ids=["2604.20001", "2604.20002"],
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    data = result.data
+    assert data is not None
+    assert data.quality_passed
+    assert data.evidence_boundary_present
+    assert data.forbidden_evidence_claims == []
+    assert data.top_k_coverage == 1.0
+
+
+def test_fixture_backed_enhanced_briefing_quality_runs_offline() -> None:
+    papers = _search_quality_papers()
+    papers_by_id = {paper.paper_id: paper for paper in papers}
+    top_k_ids = SEARCH_EXPECTED_RELEVANT_IDS
+    items = [
+        make_briefing_item(
+            papers_by_id[paper_id],
+            rank=rank,
+            score=9.0 - rank,
+        )
+        for rank, paper_id in enumerate(top_k_ids, start=1)
+    ]
+    briefing = make_quality_briefing()
+    briefing.items = items
+    briefing.highlighted_paper = items[0]
+    briefing.summary_table = [
+        BriefingTableRow(
+            rank=item.rank,
+            paper_id=item.paper_id,
+            title=item.title,
+            score=item.score,
+            key_reason=item.relevance_rationale,
+            evidence_source=item.evidence_source,
+            arxiv_url=item.arxiv_url,
+        )
+        for item in items
+    ]
+    briefing.trend_overview = CandidatePoolTrendOverview(
+        status=TrendAssessmentStatus.AVAILABLE,
+        summary=(
+            "Robotic manipulation, embodied control, and planning agents recur "
+            "across exact and related candidate papers."
+        ),
+        candidate_count=len(papers),
+        abstract_count=sum(1 for paper in papers if paper.abstract),
+        metadata_only_count=sum(1 for paper in papers if not paper.abstract),
+        top_k_count=len(items),
+        signals=[
+            TrendSignal(
+                label="robotic manipulation",
+                signal_type=TrendSignalType.HOTSPOT,
+                strength=TrendSignalStrength.MODERATE,
+                support_count=3,
+                candidate_count=len(papers),
+                top_k_count=3,
+                evidence_sources=[
+                    EvidenceSource.CANDIDATE_POOL,
+                    EvidenceSource.ABSTRACT,
+                ],
+                summary="Appears in exact and related fixture candidates.",
+            ),
+            TrendSignal(
+                label="cs.RO",
+                signal_type=TrendSignalType.CATEGORY,
+                strength=TrendSignalStrength.MODERATE,
+                support_count=5,
+                candidate_count=len(papers),
+                top_k_count=3,
+                evidence_sources=[EvidenceSource.CANDIDATE_POOL],
+                summary="Shared robotics category among relevant and weak candidates.",
+            ),
+        ],
+        limitations=["One compiler paper remains an unrelated noisy candidate."],
+        evidence_sources=[EvidenceSource.CANDIDATE_POOL, EvidenceSource.ABSTRACT],
+    )
+
+    result = evaluate_briefing_quality(
+        briefing,
+        expected_top_k_paper_ids=SEARCH_EXPECTED_RELEVANT_IDS,
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    data = result.data
+    assert data is not None
+    assert data.quality_passed
+    assert data.candidate_count == 6
+    assert data.top_k_coverage == 1.0
+    assert data.trend_signal_coverage == 1.0
+    assert data.claim_support_coverage == 1.0

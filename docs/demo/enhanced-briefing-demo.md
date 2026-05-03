@@ -39,6 +39,31 @@ daily-arxiv-agent demo \
   --no-cache
 ```
 
+## Before / After Briefing Example
+
+MVP-style briefing:
+
+> Two papers were found for agent briefing. The top result is relevant to the topic and should be read first.
+
+Why this is insufficient:
+
+| Gap | Impact |
+|-----|--------|
+| no paper-level problem or approach fields | user cannot tell what each paper contributes |
+| no Top-K comparison | ranks look interchangeable apart from score |
+| no trend status | candidate-pool context is invisible |
+| no evidence boundary | output can be mistaken for a full-text survey |
+
+Enhanced briefing:
+
+| Section | Example output |
+|---------|----------------|
+| Top-K brief | Rank 1 explains agent workflow evidence; rank 2 is explicitly metadata-limited |
+| Comparison | Rank 1 is abstract-backed while rank 2 needs follow-up before technical claims |
+| Trend status | `available` when candidate-pool signals are supported; `not_assessed` when no candidate pool was supplied |
+| Reading priority | start with the abstract-backed workflow paper, then treat metadata-only papers as leads |
+| Evidence boundary | metadata, abstract, ranking, retrieval metadata, and candidate-pool evidence only; no PDF/full-text evidence |
+
 ## Executive Summary
 
 Top papers emphasize traceable agent briefing workflows. The output is a reading guide over Top-K papers plus bounded candidate-pool context, not a full-text survey.
@@ -94,6 +119,42 @@ If the candidate pool is missing or too small, this section says `not_assessed` 
 - Evidence sources: metadata, abstract, ranking, retrieval metadata, candidate pool
 - Unavailable source: full text
 - Explicit abstention: PDF and full-text evidence are not used in the default briefing.
+
+## Quality Evaluation Hook
+
+The enhanced briefing can be checked offline with:
+
+```python
+from daily_arxiv_agent.evaluation.metrics import evaluate_briefing_quality
+
+result = evaluate_briefing_quality(
+    briefing,
+    expected_top_k_paper_ids=["2604.20001", "2604.20002", "2604.20003"],
+)
+```
+
+Expected passing signals:
+
+| Metric | Expected value |
+|--------|----------------|
+| `quality_passed` | `True` |
+| `top_k_coverage` | `1.0` when all expected Top-K IDs have detailed items |
+| `trend_status` | explicit status, including `not_assessed` when candidate-pool data is absent |
+| `reading_priority_present` | `True` |
+| `evidence_boundary_present` | `True` |
+| `claim_support_coverage` | high coverage from abstract, metadata, ranking, or candidate-pool sources |
+| `forbidden_evidence_claims` | empty in default mode |
+
+Failure examples:
+
+| Failure | Reported field |
+|---------|----------------|
+| structurally complete but generic text | `generic_claim_locations`, `claim_specificity_score`, `claim_specificity_low` |
+| missing reading guidance | `missing_sections`, `reading_priorities_missing` |
+| no evidence boundary | `missing_sections`, `evidence_boundary_missing` |
+| default briefing says full text was used | `forbidden_evidence_claims`, `default_mode_full_text_used` |
+
+The quality hook uses local `DailyBriefing` data and fixture-backed papers only. It does not require live arXiv, live LLM calls, or PDF parsing.
 
 ## UI State Matrix
 

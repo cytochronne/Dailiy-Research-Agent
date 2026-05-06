@@ -57,6 +57,37 @@ export LLM_BRIEFING_RETRY_BACKOFF_SECONDS=1.5
 export LLM_BRIEFING_OUTPUT_RETRIES=2
 ```
 
+Semantic seed recommendation uses a separate embedding provider boundary. It does
+not reuse the chat/extraction `LLMProvider` contract:
+
+```bash
+export EMBEDDING_PROVIDER=openai
+export EMBEDDING_API_KEY="<your-embedding-api-key>"
+export EMBEDDING_MODEL="text-embedding-3-small"
+export EMBEDDING_BASE_URL="https://api.openai.com/v1"
+export EMBEDDING_PATH="/embeddings"
+export EMBEDDING_TIMEOUT_SECONDS=30
+export EMBEDDING_MAX_RETRIES=2
+export EMBEDDING_RETRY_BACKOFF_SECONDS=1.0
+# Optional: provider-supported output dimension override.
+export EMBEDDING_DIMENSIONS=
+```
+
+`EMBEDDING_API_KEY` is the primary credential. `OPENAI_API_KEY` is reused for
+embeddings only when `EMBEDDING_REUSE_OPENAI_API_KEY=true` is set explicitly.
+Remote embedding endpoints must use HTTPS; plain HTTP is accepted only for
+localhost or loopback gateways. `EMBEDDING_PROVIDER=fake` enables deterministic
+non-production vectors for tests and local demos. Semantic readiness reports the
+provider mode, credential status, model, endpoint safety, cache flag, seed
+quality, and whether a semantic run can start before retrieval or provider calls.
+
+Real embedding providers receive only normalized paper title, abstract, and
+category text for seed/candidate embedding in this iteration. Errors and normal
+trace metadata do not include raw provider payloads, raw vectors, Authorization
+headers, key-like values, or provider response bodies. Semantic mode fails closed
+on provider configuration or runtime failure instead of silently switching to the
+fake provider.
+
 ## Test
 
 ```bash

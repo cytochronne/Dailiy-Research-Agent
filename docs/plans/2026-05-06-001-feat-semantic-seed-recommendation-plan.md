@@ -237,7 +237,7 @@ Implementation sequencing follows the phased delivery above. The first executabl
 **Verification:**
 - Topicless seed workflows retrieve a bounded candidate pool through arXiv query plans instead of ranking a generic `all:*` result set.
 
-- [ ] **Unit 2: Embedding Provider Boundary and Semantic Readiness**
+- [x] **Unit 2: Embedding Provider Boundary and Semantic Readiness**
 
 **Goal:** Add a replaceable embedding provider layer with real OpenAI-compatible and deterministic fake implementations.
 

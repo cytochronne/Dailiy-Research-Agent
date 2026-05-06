@@ -10,6 +10,8 @@ from daily_arxiv_agent.contracts import (
     BriefingTableRow,
     CandidatePoolTrendOverview,
     DailyBriefing,
+    EmbeddingCacheScope,
+    EmbeddingIdentity,
     EvidenceBoundClaim,
     EvidenceSource,
     EvidenceSupportStatus,
@@ -30,6 +32,7 @@ from daily_arxiv_agent.contracts import (
     TrendSignalType,
 )
 from daily_arxiv_agent.orchestrator import RecommendationWorkflow
+from daily_arxiv_agent.storage import SQLitePaperStore
 
 
 def make_paper() -> PaperMetadata:
@@ -262,3 +265,198 @@ def test_cli_compact_briefing_output_surfaces_fallback_notice() -> None:
     assert "Notice: Using deterministic fallback briefing." in output
     assert "Fallback: llm_briefing_failed" in output
     assert "## Evidence Boundary" in output
+
+
+def test_cli_demo_builds_seed_preference_from_inline_and_file(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    class SpyStore:
+        def __init__(self) -> None:
+            self.saved = []
+
+        def save_seed_preference(self, preference):  # noqa: ANN001, ANN201
+            self.saved.append(preference)
+
+    class SpyOrchestrator:
+        def __init__(self) -> None:
+            self.store = SpyStore()
+            self.calls = []
+
+        def run_recommendation(self, query, **kwargs):  # noqa: ANN001, ANN003, ANN201
+            self.calls.append({"query": query, **kwargs})
+            return make_cli_result()
+
+    seed_file = tmp_path / "seeds.txt"
+    seed_file.write_text("Embodied task planning from scene goals\n\n")
+    orchestrator = SpyOrchestrator()
+    monkeypatch.setattr(cli_module, "_build_orchestrator", lambda args: orchestrator)
+
+    exit_code = main(
+        [
+            "demo",
+            "--topic",
+            "",
+            "--profile-id",
+            "cli-profile",
+            "--seed",
+            "Learning patches from execution traces",
+            "--seed-file",
+            str(seed_file),
+            "--recommendation-mode",
+            "semantic-seed",
+            "--no-embedding-cache",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    call = orchestrator.calls[0]
+    preference = call["seed_preference"]
+    assert exit_code == 0
+    assert payload["status"] == "success"
+    assert call["query"].topic is None
+    assert call["profile_id"] == "cli-profile"
+    assert call["recommendation_mode"] == "semantic-seed"
+    assert preference.profile_id == "cli-profile"
+    assert [seed.input_text for seed in preference.seeds] == [
+        "Learning patches from execution traces",
+        "Embodied task planning from scene goals",
+    ]
+    assert orchestrator.store.saved == [preference]
+
+
+def test_cli_semantic_seed_mode_runs_with_fake_embeddings(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_CACHE_ENABLED", "false")
+
+    exit_code = main(
+        [
+            "demo",
+            "--fixture",
+            "tests/fixtures/arxiv_atom_response.xml",
+            "--db-path",
+            str(tmp_path / "semantic.sqlite3"),
+            "--topic",
+            "",
+            "--seed",
+            "Agent workflows for research paper recommendation",
+            "--recommendation-mode",
+            "semantic-seed",
+            "--top-k",
+            "1",
+            "--candidate-pool-size",
+            "2",
+            "--page-size",
+            "2",
+            "--max-requests",
+            "1",
+            "--no-cache",
+            "--no-embedding-cache",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    trace = payload["data"]["trace"]
+    ranking_step = next(step for step in trace if step["skill"] == "ranking")
+    assert exit_code == 0
+    assert payload["status"] == "success"
+    assert [step["skill"] for step in trace][:4] == [
+        "query_planning",
+        "semantic_readiness",
+        "arxiv_retrieval",
+        "ranking",
+    ]
+    assert ranking_step["metadata"]["ranking_mode"] == "semantic_seed"
+    assert ranking_step["metadata"]["semantic_provider"]["provider_mode"] == "fake"
+    assert ranking_step["metadata"]["embedding_cache"]["enabled"] is False
+
+
+def test_cli_semantic_mode_without_seed_errors_clearly(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+
+    exit_code = main(
+        [
+            "demo",
+            "--db-path",
+            str(tmp_path / "semantic.sqlite3"),
+            "--topic",
+            "robotic manipulation",
+            "--recommendation-mode",
+            "semantic-seed",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "error"
+    assert payload["error"]["code"] == "semantic_seed_quality_error"
+    assert payload["data"]["recommendations"] == []
+    assert [step["skill"] for step in payload["data"]["trace"]] == [
+        "query_planning",
+        "semantic_readiness",
+    ]
+
+
+def test_cli_semantic_mode_missing_real_embedding_credentials_surfaces_config_error(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("EMBEDDING_REUSE_OPENAI_API_KEY", "false")
+    monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    exit_code = main(
+        [
+            "demo",
+            "--db-path",
+            str(tmp_path / "semantic.sqlite3"),
+            "--topic",
+            "",
+            "--seed",
+            "Learning patches from execution traces",
+            "--recommendation-mode",
+            "semantic-seed",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "error"
+    assert payload["error"]["code"] == "semantic_embedding_credentials_missing"
+    assert payload["data"]["recommendations"] == []
+
+
+def test_cli_embedding_cache_clear_removes_only_embedding_rows(tmp_path, capsys) -> None:
+    db_path = tmp_path / "cache.sqlite3"
+    store = SQLitePaperStore(db_path)
+    identity = EmbeddingIdentity(
+        provider="fake",
+        model="fake-semantic",
+        dimensions=2,
+        input_version="semantic-paper-v1",
+        input_hash="abc123",
+        cache_scope=EmbeddingCacheScope.GLOBAL,
+    )
+    store.save_embedding(identity, [1.0, 0.0])
+
+    exit_code = main(["embedding-cache", "clear", "--db-path", str(db_path)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "success"
+    assert payload["data"]["deleted_embedding_cache_rows"] == 1
+    assert store.load_embedding(identity) is None

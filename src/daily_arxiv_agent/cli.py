@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import date
 import json
 from pathlib import Path
@@ -14,11 +15,19 @@ from daily_arxiv_agent.contracts import (
     QueryPlannerMode,
     RetrievalQuery,
     SearchMode,
+    SkillResult,
     SkillStatus,
 )
-from daily_arxiv_agent.orchestrator import DailyArxivAgentOrchestrator
+from daily_arxiv_agent.orchestrator import (
+    DailyArxivAgentOrchestrator,
+    RECOMMENDATION_MODE_AUTO,
+    RECOMMENDATION_MODE_DETERMINISTIC,
+    RECOMMENDATION_MODE_SEMANTIC_SEED,
+)
 from daily_arxiv_agent.skills.arxiv_retrieval import ArxivRetrievalSkill
 from daily_arxiv_agent.skills.followup import FollowupQuery
+from daily_arxiv_agent.skills.seed_parsing import SeedParsingSkill
+from daily_arxiv_agent.skills.semantic_seed_ranking import SemanticSeedRankingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
 
 
@@ -47,6 +56,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = _run_demo(args)
     elif args.command == "followup":
         result = _run_followup(args)
+    elif args.command == "embedding-cache":
+        result = _run_embedding_cache(args)
     else:  # pragma: no cover - argparse prevents this branch.
         parser.error(f"Unknown command: {args.command}")
     if getattr(args, "output_format", "json") == "briefing":
@@ -68,7 +79,39 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_common_filters(demo)
     demo.add_argument("--fixture", type=Path, help="arXiv Atom XML fixture path.")
     demo.add_argument("--db-path", default=config.db_path)
+    demo.add_argument("--profile-id", default="default")
     demo.add_argument("--top-k", type=int, default=5)
+    demo.add_argument(
+        "--seed",
+        action="append",
+        default=[],
+        help=(
+            "Seed paper input. Repeat for multiple seeds. Accepts arXiv IDs, "
+            "arXiv URLs, or title text."
+        ),
+    )
+    demo.add_argument(
+        "--seed-file",
+        action="append",
+        default=[],
+        type=_existing_file,
+        help="Path to a text file containing one seed paper input per line.",
+    )
+    demo.add_argument(
+        "--recommendation-mode",
+        choices=[
+            RECOMMENDATION_MODE_AUTO,
+            RECOMMENDATION_MODE_DETERMINISTIC,
+            RECOMMENDATION_MODE_SEMANTIC_SEED,
+            "semantic",
+            "semantic-seed",
+        ],
+        default=RECOMMENDATION_MODE_AUTO,
+        help=(
+            "auto uses semantic ranking for seed-only runs; deterministic disables "
+            "semantic ranking; semantic-seed explicitly requests semantic ranking."
+        ),
+    )
     demo.add_argument(
         "--candidate-pool-size",
         type=int,
@@ -118,6 +161,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     demo.add_argument("--no-cache", action="store_true")
+    demo.add_argument(
+        "--no-embedding-cache",
+        action="store_true",
+        help="Disable SQLite embedding-cache reads and writes for this demo run.",
+    )
 
     followup = subparsers.add_parser("followup", help="Run a local-first follow-up query.")
     _add_common_filters(followup)
@@ -125,6 +173,22 @@ def _build_parser() -> argparse.ArgumentParser:
     followup.add_argument("--db-path", default=config.db_path)
     followup.add_argument("--top-k", type=int, default=5)
     followup.add_argument("--local-only", action="store_true")
+
+    embedding_cache = subparsers.add_parser(
+        "embedding-cache",
+        help="Manage the local semantic embedding cache.",
+    )
+    embedding_cache_subparsers = embedding_cache.add_subparsers(
+        dest="cache_command",
+        required=True,
+    )
+    clear_cache = embedding_cache_subparsers.add_parser(
+        "clear",
+        help="Delete cached embedding vectors without deleting papers or feedback.",
+    )
+    clear_cache.add_argument("--db-path", default=config.db_path)
+    clear_cache.add_argument("--scope", choices=["global", "profile"])
+    clear_cache.add_argument("--profile-id")
     return parser
 
 
@@ -147,7 +211,7 @@ def _add_common_filters(parser: argparse.ArgumentParser) -> None:
 def _run_demo(args: argparse.Namespace) -> Any:
     orchestrator = _build_orchestrator(args)
     query = RetrievalQuery(
-        topic=args.topic,
+        topic=_optional_text(args.topic),
         category=args.category,
         start_date=args.start_date,
         end_date=args.end_date,
@@ -158,18 +222,27 @@ def _run_demo(args: argparse.Namespace) -> Any:
         max_requests=args.max_requests,
         query_planner_mode=QueryPlannerMode(args.query_planner_mode),
     )
+    seed_result = _seed_preference_from_args(args)
+    if seed_result is not None and seed_result.data is None:
+        return _seed_error_result(seed_result)
+    seed_preference = seed_result.data if seed_result is not None else None
+    if seed_preference is not None:
+        orchestrator.store.save_seed_preference(seed_preference)
     return orchestrator.run_recommendation(
         query,
+        seed_preference=seed_preference,
+        profile_id=args.profile_id,
         top_k=args.top_k,
         use_cache=not args.no_cache,
         include_debug_trace=args.debug_trace,
+        recommendation_mode=args.recommendation_mode,
     )
 
 
 def _run_followup(args: argparse.Namespace) -> Any:
     orchestrator = _build_orchestrator(args)
     query = FollowupQuery(
-        topic=args.topic,
+        topic=_optional_text(args.topic),
         category=args.category,
         start_date=args.start_date,
         end_date=args.end_date,
@@ -177,6 +250,24 @@ def _run_followup(args: argparse.Namespace) -> Any:
         fetch_if_empty=not args.local_only,
     )
     return orchestrator.run_followup_query(query, top_k=args.top_k)
+
+
+def _run_embedding_cache(args: argparse.Namespace) -> SkillResult[dict[str, int]]:
+    store = SQLitePaperStore(args.db_path)
+    deleted_rows = store.clear_embedding_cache(
+        cache_scope=args.scope,
+        profile_id=args.profile_id,
+    )
+    return SkillResult[dict[str, int]](
+        status=SkillStatus.SUCCESS,
+        data={"deleted_embedding_cache_rows": deleted_rows},
+        message=f"Deleted {deleted_rows} embedding cache row(s).",
+        metadata={
+            "db_path": str(args.db_path),
+            "cache_scope": args.scope,
+            "profile_id": args.profile_id,
+        },
+    )
 
 
 def _build_orchestrator(args: argparse.Namespace) -> DailyArxivAgentOrchestrator:
@@ -188,7 +279,64 @@ def _build_orchestrator(args: argparse.Namespace) -> DailyArxivAgentOrchestrator
             client=_FixtureClient(args.fixture),
             request_delay_seconds=0,
         )
-    return DailyArxivAgentOrchestrator(store=store, retrieval_skill=retrieval_skill)
+    semantic_ranking_skill = None
+    if getattr(args, "no_embedding_cache", False):
+        config = replace(AppConfig.from_env(), embedding_cache_enabled=False)
+        semantic_ranking_skill = SemanticSeedRankingSkill(
+            store=store,
+            config=config,
+        )
+    return DailyArxivAgentOrchestrator(
+        store=store,
+        retrieval_skill=retrieval_skill,
+        semantic_ranking_skill=semantic_ranking_skill,
+    )
+
+
+def _seed_preference_from_args(
+    args: argparse.Namespace,
+) -> SkillResult[Any] | None:
+    seeds, has_seed_source = _seed_inputs_from_args(args)
+    if not has_seed_source:
+        return None
+    return SeedParsingSkill().build_preference(
+        seeds,
+        profile_id=args.profile_id,
+    )
+
+
+def _seed_inputs_from_args(args: argparse.Namespace) -> tuple[list[str], bool]:
+    seed_values: list[str] = []
+    raw_seed_values = getattr(args, "seed", None) or []
+    seed_files = getattr(args, "seed_file", None) or []
+    for raw_seed in raw_seed_values:
+        seed_values.extend(_nonblank_lines(raw_seed))
+    for seed_file in seed_files:
+        seed_values.extend(_nonblank_lines(seed_file.read_text()))
+    return seed_values, bool(raw_seed_values or seed_files)
+
+
+def _seed_error_result(seed_result: SkillResult[Any]) -> SkillResult[Any]:
+    return SkillResult[Any](
+        status=SkillStatus.ERROR,
+        data=None,
+        evidence_source=seed_result.evidence_source,
+        error=seed_result.error,
+        message=seed_result.message or "Seed input could not be parsed.",
+        metadata={
+            "cli_stage": "seed_parsing",
+            **seed_result.metadata,
+        },
+    )
+
+
+def _nonblank_lines(raw: str) -> list[str]:
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def _optional_text(value: str | None) -> str | None:
+    normalized = " ".join((value or "").split())
+    return normalized or None
 
 
 def _parse_date(raw: str) -> date:
@@ -196,6 +344,13 @@ def _parse_date(raw: str) -> date:
         return date.fromisoformat(raw)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("date must use YYYY-MM-DD format") from exc
+
+
+def _existing_file(raw: str) -> Path:
+    path = Path(raw)
+    if not path.is_file():
+        raise argparse.ArgumentTypeError(f"seed file does not exist: {raw}")
+    return path
 
 
 def _exit_code_for_status(status: SkillStatus) -> int:

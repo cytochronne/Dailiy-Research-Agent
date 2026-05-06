@@ -481,7 +481,7 @@ sort_key = semantic_bucket, semantic_seed_score, secondary_score, recency, title
 **Verification:**
 - Users can visually inspect why a paper was recommended, which seed influenced it, and how like/dislike changed ranking.
 
-- [ ] **Unit 7: CLI, Docs, and Evaluation Fixtures**
+- [x] **Unit 7: CLI, Docs, and Evaluation Fixtures**
 
 **Goal:** Make semantic seed recommendation usable and documented across CLI/demo surfaces and add evaluation coverage for recommendation quality.
 

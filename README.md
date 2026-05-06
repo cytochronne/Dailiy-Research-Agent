@@ -71,15 +71,15 @@ export EMBEDDING_MAX_RETRIES=2
 export EMBEDDING_RETRY_BACKOFF_SECONDS=1.0
 # Optional: provider-supported output dimension override.
 export EMBEDDING_DIMENSIONS=
+export EMBEDDING_CACHE_ENABLED=true
 ```
 
 `EMBEDDING_API_KEY` is the primary credential. `OPENAI_API_KEY` is reused for
 embeddings only when `EMBEDDING_REUSE_OPENAI_API_KEY=true` is set explicitly.
 Remote embedding endpoints must use HTTPS; plain HTTP is accepted only for
 localhost or loopback gateways. `EMBEDDING_PROVIDER=fake` enables deterministic
-non-production vectors for tests and local demos. Semantic readiness reports the
-provider mode, credential status, model, endpoint safety, cache flag, seed
-quality, and whether a semantic run can start before retrieval or provider calls.
+non-production vectors for tests and local demos. It is never selected as a
+fallback after a real provider fails.
 
 Real embedding providers receive only normalized paper title, abstract, and
 category text for seed/candidate embedding in this iteration. Errors and normal
@@ -87,6 +87,24 @@ trace metadata do not include raw provider payloads, raw vectors, Authorization
 headers, key-like values, or provider response bodies. Semantic mode fails closed
 on provider configuration or runtime failure instead of silently switching to the
 fake provider.
+
+Semantic readiness reports the provider mode, credential status, model, endpoint
+safety, cache flag, seed quality, and whether a semantic run can start before
+retrieval or provider calls. Set `EMBEDDING_CACHE_ENABLED=false` to disable
+SQLite embedding-cache reads and writes by default, or pass
+`--no-embedding-cache` for a single CLI demo run. Clear cached vectors without
+deleting papers, seed preferences, retrieval runs, full-text cache rows, or
+feedback with:
+
+```bash
+daily-arxiv-agent embedding-cache clear --db-path data/daily_arxiv.sqlite3
+```
+
+Real embedding calls add provider latency and per-token/vector cost on cache
+misses. Keep `DAILY_ARXIV_CANDIDATE_POOL_SIZE`, `ARXIV_PAGE_SIZE`, and
+`ARXIV_MAX_REQUESTS_PER_SEARCH` bounded for exploratory runs; repeated runs over
+unchanged seed/candidate metadata should hit the local embedding cache when it is
+enabled.
 
 ## Test
 
@@ -378,6 +396,56 @@ daily-arxiv-agent demo \
 ```
 
 The compact renderer orders sections as executive summary, Top-K reading guide, and evidence boundary. It intentionally omits noisy trace internals while preserving fallback notices and evidence limits.
+
+Semantic seed CLI demo with deterministic fake embeddings:
+
+```bash
+export LLM_PROVIDER=fake
+export EMBEDDING_PROVIDER=fake
+
+daily-arxiv-agent demo \
+  --fixture tests/fixtures/arxiv_atom_response.xml \
+  --topic "" \
+  --seed "Agent workflows for research paper recommendation" \
+  --recommendation-mode semantic-seed \
+  --search-mode broad \
+  --candidate-pool-size 20 \
+  --top-k 2 \
+  --no-cache \
+  --no-embedding-cache
+```
+
+Use repeated `--seed` flags or `--seed-file seeds.txt` for multiple seed papers.
+Seed inputs accept arXiv IDs, arXiv URLs, and title text. arXiv ID/URL seeds may
+call arXiv once to resolve metadata; title-only seeds are local. In `auto` mode,
+topicless seed runs use seed-derived retrieval and semantic seed ranking, while
+topic + seed runs remain deterministic unless semantic seed mode is explicitly
+requested. `--recommendation-mode deterministic` disables semantic ranking for
+the run.
+
+Semantic mode requires a usable seed. Running `--recommendation-mode
+semantic-seed` without a seed or stored profile seed returns
+`semantic_seed_quality_error` instead of generic recommendations. Running real
+semantic mode without `EMBEDDING_API_KEY` returns
+`semantic_embedding_credentials_missing` before arXiv retrieval or embedding
+calls.
+
+Real semantic seed run:
+
+```bash
+export LLM_PROVIDER=fake
+export EMBEDDING_PROVIDER=openai
+export EMBEDDING_API_KEY="<your-embedding-api-key>"
+export EMBEDDING_MODEL="text-embedding-3-small"
+
+daily-arxiv-agent demo \
+  --topic "" \
+  --seed "2604.00001" \
+  --recommendation-mode semantic-seed \
+  --search-mode broad \
+  --candidate-pool-size 100 \
+  --top-k 5
+```
 
 Real API demo:
 

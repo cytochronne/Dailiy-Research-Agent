@@ -2,6 +2,7 @@ from datetime import date
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
+from daily_arxiv_agent.config import AppConfig
 from daily_arxiv_agent.contracts import (
     BriefingEvidenceBoundary,
     BriefingTableRow,
@@ -21,6 +22,8 @@ from daily_arxiv_agent.contracts import (
     ReadingPriority,
     Recommendation,
     RetrievalQuery,
+    SeedPreference,
+    SeedRecord,
     SearchMode,
     SkillStatus,
     TopKComparisonNote,
@@ -29,6 +32,7 @@ from daily_arxiv_agent.contracts import (
     TrendSignalStrength,
     TrendSignalType,
 )
+from daily_arxiv_agent.embeddings.fake import FakeEmbeddingProvider
 from daily_arxiv_agent.evaluation.metrics import (
     check_explanation_completeness,
     evaluate_briefing_quality,
@@ -44,6 +48,11 @@ from daily_arxiv_agent.skills.arxiv_retrieval import (
 )
 from daily_arxiv_agent.skills.query_planning import QueryPlanningSkill
 from daily_arxiv_agent.skills.ranking import TopicRankingSkill
+from daily_arxiv_agent.skills.seed_parsing import (
+    DeterministicTextVectorizer,
+    build_paper_preference_text,
+)
+from daily_arxiv_agent.skills.semantic_seed_ranking import SemanticSeedRankingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
 
 
@@ -52,6 +61,7 @@ SEARCH_QUALITY_FIXTURE = (
 )
 SEARCH_TOPIC = "multimodal llm agents for robotic manipulation"
 SEARCH_EXPECTED_RELEVANT_IDS = ["2604.20001", "2604.20002", "2604.20003"]
+SEED_SEARCH_EXPECTED_RELEVANT_IDS = ["2604.20001", "2604.20002", "2604.20003"]
 
 
 def make_paper(paper_id: str, title: str | None = None) -> PaperMetadata:
@@ -103,6 +113,20 @@ class SearchQualityClient:
         return FakeResponse(_search_quality_feed(_ids_for_search_query(search_query)))
 
 
+class SeedDerivedQualityClient:
+    """Route seed-derived query variants to known relevant quality-fixture rows."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def get(self, url: str, params: dict[str, object], timeout: float) -> FakeResponse:
+        self.calls.append({"url": url, "params": params, "timeout": timeout})
+        search_query = str(params["search_query"])
+        return FakeResponse(
+            _search_quality_feed(_ids_for_seed_derived_query(search_query))
+        )
+
+
 class DivergentQualityPlannerProvider:
     def plan_queries(self, **kwargs):  # noqa: ANN003, ANN201
         return {
@@ -131,6 +155,22 @@ def _ids_for_search_query(search_query: str) -> list[str]:
     return ["2604.20001"]
 
 
+def _ids_for_seed_derived_query(search_query: str) -> list[str]:
+    normalized = search_query.lower()
+    if any(
+        term in normalized
+        for term in (
+            "multimodal",
+            "robotic",
+            "manipulation",
+            "embodied",
+            "planning",
+        )
+    ):
+        return list(SEED_SEARCH_EXPECTED_RELEVANT_IDS)
+    return ["2604.20004"]
+
+
 def _search_quality_feed(paper_ids: list[str]) -> str:
     root = ET.fromstring(SEARCH_QUALITY_FIXTURE.read_text())
     entries = []
@@ -150,6 +190,42 @@ def _search_quality_papers() -> list[PaperMetadata]:
     return parse_atom_response(
         SEARCH_QUALITY_FIXTURE.read_text(),
         RetrievalQuery(topic=SEARCH_TOPIC),
+    )
+
+
+def make_seed_preference_from_papers(
+    papers: list[PaperMetadata],
+    *,
+    profile_id: str = "default",
+) -> SeedPreference:
+    records = [
+        SeedRecord(
+            identity=f"arxiv:{paper.paper_id}",
+            input_text=paper.paper_id,
+            input_type="arxiv_id",
+            paper_id=paper.paper_id,
+            title=paper.title,
+            abstract=paper.abstract,
+            paper=paper,
+            preference_text=build_paper_preference_text(paper),
+        )
+        for paper in papers
+    ]
+    preference_text = "\n\n".join(record.preference_text for record in records)
+    return SeedPreference(
+        profile_id=profile_id,
+        seeds=records,
+        preference_text=preference_text,
+        vector=DeterministicTextVectorizer().vectorize(preference_text),
+    )
+
+
+def semantic_evaluation_config(*, dimensions: int = 3) -> AppConfig:
+    return AppConfig(
+        embedding_provider="fake",
+        embedding_model="fake-semantic",
+        embedding_dimensions=dimensions,
+        embedding_cache_enabled=False,
     )
 
 
@@ -791,6 +867,141 @@ def test_search_quality_evaluation_covers_candidate_count_top_k_and_rationales(
     assert data.recall_at_k == 1.0
     assert data.rationale_coverage == 1.0
     assert data.missing_rationale_ids == []
+
+
+def test_seed_derived_retrieval_fixture_reports_known_relevant_candidate_recall(
+    tmp_path,
+) -> None:
+    seed = make_briefing_paper(
+        "2604.19999",
+        "Multimodal LLM Agents for Robotic Manipulation",
+        (
+            "Vision-language agents plan embodied manipulation tasks with "
+            "closed-loop robot control."
+        ),
+        categories=["cs.RO", "cs.AI"],
+    )
+    query = RetrievalQuery(
+        topic=None,
+        category="cs.RO",
+        search_mode=SearchMode.BROAD,
+        candidate_pool_size=20,
+        page_size=10,
+        max_requests=3,
+        query_planner_mode=QueryPlannerMode.DETERMINISTIC,
+    )
+    seed_preference = make_seed_preference_from_papers([seed], profile_id="eval")
+    plan_result = QueryPlanningSkill().plan_from_seed(query, seed_preference)
+    assert plan_result.status == SkillStatus.SUCCESS
+    assert plan_result.data is not None
+    assert plan_result.metadata["source"] == "seed_derived"
+
+    client = SeedDerivedQualityClient()
+    retrieval = ArxivRetrievalSkill(
+        store=SQLitePaperStore(tmp_path / "seed-recall.sqlite3"),
+        client=client,
+        request_delay_seconds=0,
+    ).retrieve(query, query_plan=plan_result.data)
+
+    evaluation = evaluate_search_quality(
+        retrieval.data or [],
+        [],
+        SEED_SEARCH_EXPECTED_RELEVANT_IDS,
+        retrieval_metadata=retrieval.metadata,
+    )
+
+    assert evaluation.status == SkillStatus.SUCCESS
+    assert evaluation.data is not None
+    assert evaluation.data.relevant_candidate_ids == SEED_SEARCH_EXPECTED_RELEVANT_IDS
+    assert evaluation.data.relevant_candidate_coverage == 1.0
+    assert client.calls
+    assert all(
+        "all:*" not in str(call["params"]["search_query"]) for call in client.calls
+    )
+
+
+def test_semantic_seed_fixture_beats_deterministic_lexical_only_baseline(
+    tmp_path,
+) -> None:
+    seed = make_briefing_paper(
+        "2604.30001",
+        "Graph Neural Program Repair",
+        "Neural models repair code defects from failing tests.",
+        categories=["cs.SE"],
+    )
+    related = make_briefing_paper(
+        "2604.30002",
+        "Learning Patches from Execution Traces",
+        "Models synthesize bug fixes from runtime traces and test failures.",
+        categories=["cs.SE"],
+    )
+    lexical_distractor = make_briefing_paper(
+        "2604.30003",
+        "Graph Neural Program Repair Bibliography",
+        (
+            "Graph neural program repair terms appear in citation metadata, "
+            "but the paper only indexes references."
+        ),
+        categories=["cs.SE"],
+    )
+    unrelated = make_briefing_paper(
+        "2604.30004",
+        "Register Allocation in Optimizing Compilers",
+        "A systems survey of register pressure and compiler allocation heuristics.",
+        categories=["cs.PL"],
+    )
+    seed_preference = make_seed_preference_from_papers([seed], profile_id="eval")
+    candidates = [related, lexical_distractor, unrelated]
+
+    deterministic_result = TopicRankingSkill().rank(
+        candidates,
+        seed_preference=seed_preference,
+        top_k=3,
+    )
+    vectors = {
+        build_paper_preference_text(seed): [1.0, 0.0, 0.0],
+        build_paper_preference_text(related): [0.98, 0.02, 0.0],
+        build_paper_preference_text(lexical_distractor): [0.0, 1.0, 0.0],
+        build_paper_preference_text(unrelated): [-1.0, 0.0, 0.0],
+    }
+    semantic_result = SemanticSeedRankingSkill(
+        embedding_provider=FakeEmbeddingProvider(dimensions=3, vector_map=vectors),
+        store=SQLitePaperStore(tmp_path / "semantic-ranking.sqlite3"),
+        config=semantic_evaluation_config(),
+        minimum_semantic_similarity=0.4,
+    ).rank(
+        candidates,
+        seed_preference=seed_preference,
+        retrieval_query=RetrievalQuery(topic=None, category="cs.SE"),
+        top_k=3,
+    )
+
+    assert deterministic_result.status == SkillStatus.SUCCESS
+    assert semantic_result.status == SkillStatus.SUCCESS
+    deterministic_recommendations = deterministic_result.data or []
+    semantic_recommendations = semantic_result.data or []
+    assert deterministic_recommendations[0].paper.paper_id == lexical_distractor.paper_id
+    assert semantic_recommendations[0].paper.paper_id == related.paper_id
+
+    baseline_eval = evaluate_recommendations(
+        deterministic_recommendations,
+        [related.paper_id],
+        k=1,
+    )
+    semantic_eval = evaluate_recommendations(
+        semantic_recommendations,
+        [related.paper_id],
+        k=1,
+    )
+
+    assert baseline_eval.data is not None
+    assert semantic_eval.data is not None
+    assert baseline_eval.data.precision_at_k == 0.0
+    assert semantic_eval.data.precision_at_k == 1.0
+    assert (
+        semantic_eval.data.mean_reciprocal_rank
+        > baseline_eval.data.mean_reciprocal_rank
+    )
 
 
 def test_bad_llm_query_plan_falls_back_before_search_quality_can_degrade(

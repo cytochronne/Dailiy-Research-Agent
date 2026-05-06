@@ -44,6 +44,47 @@ Preference metadata:
 - The unrelated compiler paper is still returned to fill Top-K, but its low score and rationale make the weak match visible.
 - Automated tests cover arXiv ID resolution, URL normalization, title-only seeds, duplicate collapse, invalid seed errors, metadata-fetch fallback, seed-only ranking, hybrid topic+seed ranking, and SQLite preference reuse.
 
+## Unit 7 Semantic Seed CLI Addendum
+
+Unit 7 keeps this metadata/abstract-only evidence boundary and adds a CLI path
+for semantic seed recommendation. A reproducible fake-provider run uses local
+deterministic embeddings:
+
+```bash
+export LLM_PROVIDER=fake
+export EMBEDDING_PROVIDER=fake
+
+daily-arxiv-agent demo \
+  --fixture tests/fixtures/arxiv_atom_response.xml \
+  --topic "" \
+  --seed "Agent workflows for research paper recommendation" \
+  --recommendation-mode semantic-seed \
+  --top-k 2 \
+  --no-cache \
+  --no-embedding-cache
+```
+
+For real OpenAI-compatible embeddings, set `EMBEDDING_PROVIDER=openai`,
+`EMBEDDING_API_KEY`, `EMBEDDING_MODEL`, `EMBEDDING_BASE_URL`, and
+`EMBEDDING_PATH` as shown in `.env.example`. Semantic mode fails closed:
+missing seeds return `semantic_seed_quality_error`, and missing real provider
+credentials return `semantic_embedding_credentials_missing` before retrieval or
+embedding calls.
+
+Evaluation fixtures now check the two quality gates that motivated semantic
+seed mode:
+
+| Gate | Controlled fixture outcome |
+|---|---|
+| Seed-derived retrieval recall | Known robotic-manipulation candidates `2604.20001`, `2604.20002`, and `2604.20003` are retrieved from seed-derived query variants. |
+| Semantic ranking over lexical baseline | A semantically related bug-fix paper reaches precision@1 = 1.0, while the deterministic lexical-only baseline ranks a high-overlap bibliography distractor first. |
+
+Real embedding providers receive only normalized title, abstract, and category
+text for seed and candidate papers. Authors, PDFs, full text, raw feedback
+notes, raw provider payloads, and raw vectors are outside the default semantic
+data boundary. Disable cache writes with `EMBEDDING_CACHE_ENABLED=false` or
+`--no-embedding-cache`; clear cached vectors with `daily-arxiv-agent embedding-cache clear`.
+
 ## Acceptance Question
 
 Does seed-based personalization behave plausibly?

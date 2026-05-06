@@ -221,14 +221,14 @@ def test_cli_compact_briefing_output_uses_required_section_order(monkeypatch, ca
     headings = [
         "## Executive Summary",
         "## Top-K Reading Guide",
-        "## Trend / Hotspot Overview",
-        "## Top-K Comparison",
-        "## Reading Priorities",
         "## Evidence Boundary",
     ]
     positions = [output.index(heading) for heading in headings]
     assert exit_code == 0
     assert positions == sorted(positions)
+    assert "## Trend / Hotspot Overview" not in output
+    assert "## Top-K Comparison" not in output
+    assert "## Reading Priorities" not in output
     assert "Status: success" in output
     assert "Full text used: no" in output
     assert "No PDF or full-text evidence was used." in output

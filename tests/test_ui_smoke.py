@@ -320,40 +320,30 @@ def test_enhanced_briefing_sections_follow_required_order() -> None:
     assert [section["key"] for section in sections] == [
         "executive_summary",
         "top_k_reading_guide",
-        "trend_hotspot_overview",
-        "top_k_comparison",
-        "reading_priorities",
         "evidence_boundary",
     ]
     guide = sections[1]
     assert guide["summary_rows"][0]["paper_id"] == "2604.00001"
     assert guide["paper_briefs"][0]["problem"].startswith("Daily paper monitoring")
-    assert sections[2]["signals"][0]["label"] == "agent workflow"
-    assert sections[2]["signals"][1]["top_k_count"] == 0
-    assert sections[3]["rows"][0]["dimension"] == "evidence coverage"
-    assert sections[4]["rows"][0]["reading_intent"] == (
-        "start with abstract-backed workflow evidence"
-    )
-    assert sections[5]["full_text_used"] == "no"
-    assert "full_text" in sections[5]["unavailable_sources"]
+    assert sections[2]["full_text_used"] == "no"
+    assert "full_text" in sections[2]["unavailable_sources"]
 
 
-def test_enhanced_briefing_sections_render_metadata_limited_and_unassessed_trends() -> None:
+def test_enhanced_briefing_sections_render_metadata_limited_and_boundary() -> None:
     briefing = make_enhanced_briefing(trend_status=TrendAssessmentStatus.NOT_ASSESSED)
 
     sections = enhanced_briefing_sections(briefing)
+    section_keys = {section["key"] for section in sections}
 
     guide = sections[1]
     metadata_brief = guide["paper_briefs"][1]
     assert "No abstract is available" in metadata_brief["problem"]
     assert "metadata and ranking context" in metadata_brief["reading_guide"]
+    assert "trend_hotspot_overview" not in section_keys
+    assert "top_k_comparison" not in section_keys
+    assert "reading_priorities" not in section_keys
 
-    trend = sections[2]
-    assert trend["status"] == "not_assessed"
-    assert trend["signals"] == []
-    assert "not assessed" in trend["summary"]
-
-    boundary = sections[5]
+    boundary = sections[2]
     assert boundary["full_text_used"] == "no"
     assert any("PDF and full-text evidence" in note for note in boundary["abstentions"])
 

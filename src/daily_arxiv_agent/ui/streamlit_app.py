@@ -408,7 +408,6 @@ def enhanced_briefing_sections(
     if briefing is None:
         return []
 
-    trend = briefing.trend_overview
     boundary = briefing.evidence_boundary
     return [
         {
@@ -421,32 +420,6 @@ def enhanced_briefing_sections(
             "title": "Top-K Reading Guide",
             "summary_rows": briefing_rows(briefing),
             "paper_briefs": briefing_paper_brief_rows(briefing),
-        },
-        {
-            "key": "trend_hotspot_overview",
-            "title": "Trend / Hotspot Overview",
-            "status": trend.status.value,
-            "summary": (
-                trend.summary
-                or _trend_status_note(trend.status.value, trend.limitations)
-            ),
-            "candidate_count": trend.candidate_count,
-            "abstract_count": trend.abstract_count,
-            "metadata_only_count": trend.metadata_only_count,
-            "top_k_count": trend.top_k_count,
-            "evidence": _evidence_sources_text(trend.evidence_sources),
-            "limitations": list(trend.limitations),
-            "signals": briefing_trend_signal_rows(briefing),
-        },
-        {
-            "key": "top_k_comparison",
-            "title": "Top-K Comparison",
-            "rows": briefing_comparison_rows(briefing),
-        },
-        {
-            "key": "reading_priorities",
-            "title": "Reading Priorities",
-            "rows": briefing_reading_priority_rows(briefing),
         },
         {
             "key": "evidence_boundary",
@@ -1283,37 +1256,6 @@ def _render_daily_briefing(st: Any, briefing: DailyBriefing) -> None:
                 "Relevance",
                 f"{brief['relevance_rationale']} {brief['relevance_evidence']}",
             )
-
-    trend = sections["trend_hotspot_overview"]
-    st.subheader(str(trend["title"]))
-    st.write(trend["summary"])
-    st.caption(
-        f"Status: {trend['status']} | Candidates: {trend['candidate_count']} | "
-        f"Abstract-backed: {trend['abstract_count']} | "
-        f"Metadata-only: {trend['metadata_only_count']} | "
-        f"Top-K: {trend['top_k_count']}"
-    )
-    if trend["signals"]:
-        st.dataframe(trend["signals"], use_container_width=True, hide_index=True)
-    else:
-        notes = trend["limitations"] or [trend["summary"]]
-        st.info(" ".join(str(note) for note in notes if note))
-
-    comparison = sections["top_k_comparison"]
-    st.subheader(str(comparison["title"]))
-    comparison_rows = comparison["rows"]
-    if comparison_rows:
-        st.dataframe(comparison_rows, use_container_width=True, hide_index=True)
-    else:
-        st.info("No Top-K comparison notes were available for this run.")
-
-    priorities = sections["reading_priorities"]
-    st.subheader(str(priorities["title"]))
-    priority_rows = priorities["rows"]
-    if priority_rows:
-        st.dataframe(priority_rows, use_container_width=True, hide_index=True)
-    else:
-        st.info("No reading priorities were available for this run.")
 
     boundary = sections["evidence_boundary"]
     st.subheader(str(boundary["title"]))

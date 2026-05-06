@@ -227,17 +227,6 @@ def compact_briefing_output(result: Any) -> str:
             lines.append(str(section["body"]))
         elif key == "top_k_reading_guide":
             lines.extend(_format_top_k_section(section))
-        elif key == "trend_hotspot_overview":
-            lines.extend(_format_trend_section(section))
-        elif key == "top_k_comparison":
-            lines.extend(_format_row_section(section["rows"], ["dimension", "note", "evidence"]))
-        elif key == "reading_priorities":
-            lines.extend(
-                _format_row_section(
-                    section["rows"],
-                    ["priority", "reading_intent", "paper_id", "rank", "reason"],
-                )
-            )
         elif key == "evidence_boundary":
             lines.extend(_format_boundary_section(section))
     return "\n".join(lines)
@@ -273,33 +262,6 @@ def _format_top_k_section(section: dict[str, object]) -> list[str]:
         _append_optional_line(lines, "Contributions", brief["contributions"])
         _append_optional_line(lines, "Methods", brief["methods"])
         lines.append(f"Relevance: {brief['relevance_rationale']}")
-    return lines
-
-
-def _format_trend_section(section: dict[str, object]) -> list[str]:
-    lines = [
-        str(section["summary"]),
-        (
-            f"Status: {section['status']} | Candidates: {section['candidate_count']} | "
-            f"Abstract-backed: {section['abstract_count']} | "
-            f"Metadata-only: {section['metadata_only_count']} | "
-            f"Top-K: {section['top_k_count']}"
-        ),
-    ]
-    signals = section["signals"]
-    if signals:
-        lines.extend(
-            _format_row_section(
-                signals,
-                ["label", "type", "strength", "support_count", "top_k_count", "query_echo"],
-            )
-        )
-    else:
-        limitations = section["limitations"]
-        if limitations:
-            lines.append("Limitations: " + "; ".join(str(item) for item in limitations))
-        else:
-            lines.append("No hotspot table was available for this run.")
     return lines
 
 

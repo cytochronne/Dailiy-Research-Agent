@@ -17,6 +17,7 @@ from daily_arxiv_agent.contracts import (
     QueryPlannerMode,
     Recommendation,
     RetrievalQuery,
+    SeedPreference,
     SearchMode,
     SkillResult,
     SkillStatus,
@@ -28,11 +29,15 @@ from daily_arxiv_agent.orchestrator import (
     FeedbackWorkflow,
     PaperExplanationWorkflow,
     RecommendationWorkflow,
+    RECOMMENDATION_MODE_AUTO,
+    RECOMMENDATION_MODE_DETERMINISTIC,
+    RECOMMENDATION_MODE_SEMANTIC_SEED,
     WorkflowTraceStep,
 )
 from daily_arxiv_agent.skills.feedback import FeedbackValue
 from daily_arxiv_agent.skills.followup import FollowupQuery
 from daily_arxiv_agent.skills.seed_parsing import SeedParsingSkill
+from daily_arxiv_agent.skills.semantic_seed_ranking import SemanticSeedRankingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
 
 
@@ -53,6 +58,11 @@ QUERY_PLANNER_LABELS = {
     QueryPlannerMode.AUTO.value: "Auto",
     QueryPlannerMode.DETERMINISTIC.value: "Deterministic",
     QueryPlannerMode.LLM.value: "LLM",
+}
+RECOMMENDATION_MODE_LABELS = {
+    RECOMMENDATION_MODE_AUTO: "Auto",
+    RECOMMENDATION_MODE_DETERMINISTIC: "Deterministic",
+    RECOMMENDATION_MODE_SEMANTIC_SEED: "Semantic seed",
 }
 APP_CSS = """
 <style>
@@ -309,6 +319,7 @@ def recommendation_rows(
             "rationale": recommendation.rationale,
             "arxiv_url": str(recommendation.paper.arxiv_url),
         }
+        row.update(_semantic_recommendation_row_fields(recommendation))
         if recommendation.previous_rank is not None:
             row["previous_rank"] = recommendation.previous_rank
         if recommendation.rank_delta is not None:
@@ -345,8 +356,287 @@ def workflow_trace_rows(trace: Sequence[WorkflowTraceStep]) -> list[dict[str, ob
                 "candidates": _metadata_text(metadata.get("candidate_count")),
                 "cache": _cache_summary_for_step(step),
                 "ranking_mode": _metadata_text(metadata.get("ranking_mode")),
+                "recommendation_mode": _metadata_text(
+                    metadata.get("recommendation_mode")
+                ),
+                "semantic_provider": _semantic_provider_summary_for_step(step),
+                "embedding_cache": _embedding_cache_summary_for_step(step),
+                "semantic_state": _semantic_state_for_step(step),
             }
         )
+    return rows
+
+
+def semantic_readiness_panel_rows(
+    readiness: Mapping[str, Any] | None,
+    *,
+    cache_path: str | None,
+    recommendation_mode: str,
+    seed_count: int,
+) -> list[dict[str, object]]:
+    """Build trace-safe semantic readiness rows for the pre-run UI panel."""
+
+    metadata = dict(readiness or {})
+    cache_enabled = bool(metadata.get("cache_enabled"))
+    warnings = metadata.get("warnings") or []
+    if not isinstance(warnings, Sequence) or isinstance(warnings, str):
+        warnings = []
+    return [
+        {
+            "item": "recommendation_mode",
+            "status": _recommendation_mode_label(recommendation_mode),
+            "details": _recommendation_mode_help(recommendation_mode),
+        },
+        {
+            "item": "readiness",
+            "status": "ready" if metadata.get("can_run") else "blocked",
+            "details": _metadata_text(metadata.get("error_code")),
+        },
+        {
+            "item": "provider",
+            "status": _metadata_text(metadata.get("provider_label")),
+            "details": _metadata_text(metadata.get("provider_mode")),
+        },
+        {
+            "item": "model",
+            "status": _metadata_text(metadata.get("model")),
+            "details": _metadata_text(metadata.get("provider")),
+        },
+        {
+            "item": "credentials",
+            "status": _metadata_text(metadata.get("credential_status")),
+            "details": "checked before retrieval",
+        },
+        {
+            "item": "endpoint",
+            "status": _metadata_text(metadata.get("endpoint_safety")),
+            "details": _metadata_text(metadata.get("endpoint")),
+        },
+        {
+            "item": "cache",
+            "status": "enabled" if cache_enabled else "disabled",
+            "details": cache_path or "",
+        },
+        {
+            "item": "seed_quality",
+            "status": _metadata_text(metadata.get("seed_quality")),
+            "details": f"{seed_count} seed input(s)",
+        },
+        {
+            "item": "warnings",
+            "status": str(len(warnings)),
+            "details": "; ".join(str(item) for item in warnings),
+        },
+    ]
+
+
+def semantic_error_notice(
+    result: SkillResult[RecommendationWorkflow] | None,
+) -> dict[str, str] | None:
+    """Return a semantic-specific banner when recommendations need explanation."""
+
+    if result is None:
+        return None
+    workflow = result.data
+    code = (
+        result.error.code
+        if result.error is not None
+        and result.error.code.startswith("semantic_")
+        else None
+    )
+    if code is None and workflow is not None:
+        code = _first_semantic_trace_error_code(workflow.trace)
+    if code is not None:
+        if (
+            code == "semantic_feedback_refinement_failed"
+            and workflow is not None
+            and workflow.recommendations
+        ):
+            return {
+                "kind": "warning",
+                "message": (
+                    "Semantic feedback refinement failed, so the original "
+                    "semantic recommendations were preserved. Inspect the "
+                    "feedback diagnostics before trusting rank movement."
+                ),
+            }
+        return _semantic_error_notice_for_code(code)
+    if workflow is None:
+        return None
+
+    retrieval_state = _semantic_retrieval_state(workflow.trace)
+    if retrieval_state == "no_seed_candidates":
+        return {
+            "kind": "warning",
+            "message": (
+                "Semantic recommendations were withheld because seed-derived "
+                "retrieval returned no non-seed candidates. Broaden the date, "
+                "category, or seed set."
+            ),
+        }
+    if _all_semantic_recommendations_low_evidence(workflow.recommendations):
+        return {
+            "kind": "warning",
+            "message": (
+                "Semantic embedding succeeded, but every visible recommendation "
+                "is below the configured evidence threshold and is labeled as "
+                "low evidence."
+            ),
+        }
+    return None
+
+
+def semantic_provider_cache_rows(
+    trace: Sequence[WorkflowTraceStep],
+) -> list[dict[str, object]]:
+    """Summarize provider, cache, retrieval, and error states without raw payloads."""
+
+    rows: list[dict[str, object]] = []
+    for step in trace:
+        metadata = step.metadata
+        provider = _semantic_provider_summary_for_step(step)
+        embedding_cache = _embedding_cache_summary_for_step(step)
+        retrieval_cache = _cache_summary_for_step(step)
+        semantic_state = _semantic_state_for_step(step)
+        if not any(
+            (
+                provider,
+                embedding_cache,
+                retrieval_cache,
+                semantic_state,
+                step.skill in {"semantic_readiness", "arxiv_retrieval", "ranking"},
+            )
+        ):
+            continue
+        rows.append(
+            {
+                "step": step.step,
+                "skill": step.skill,
+                "status": step.status.value,
+                "recommendation_mode": _metadata_text(
+                    metadata.get("recommendation_mode")
+                ),
+                "provider": provider,
+                "model": _semantic_model_for_step(step),
+                "credential": _metadata_text(metadata.get("credential_status")),
+                "endpoint": _metadata_text(metadata.get("endpoint_safety")),
+                "embedding_cache": embedding_cache,
+                "retrieval_cache": retrieval_cache,
+                "candidates": _metadata_text(metadata.get("candidate_count")),
+                "semantic_state": semantic_state,
+            }
+        )
+    return rows
+
+
+def semantic_similarity_rows(
+    recommendations: Sequence[Recommendation],
+) -> list[dict[str, object]]:
+    """Render per-seed similarity diagnostics from structured score data."""
+
+    rows: list[dict[str, object]] = []
+    for recommendation in sorted(recommendations, key=lambda item: item.rank):
+        breakdown = recommendation.score_breakdown
+        if breakdown is None:
+            continue
+        top = _top_semantic_similarity(breakdown.semantic_similarities)
+        for detail in sorted(
+            breakdown.semantic_similarities,
+            key=lambda item: item.similarity,
+            reverse=True,
+        ):
+            rows.append(
+                {
+                    "rank": recommendation.rank,
+                    "paper_id": recommendation.paper.paper_id,
+                    "title": recommendation.paper.title,
+                    "seed": _similarity_source_label(detail),
+                    "similarity": round(detail.similarity, 4),
+                    "weighted_score": round(detail.score, 4),
+                    "top_match": "yes" if detail is top else "no",
+                }
+            )
+    return rows
+
+
+def score_composition_rows(
+    recommendations: Sequence[Recommendation],
+) -> list[dict[str, object]]:
+    """Render score components from structured breakdown fields."""
+
+    rows: list[dict[str, object]] = []
+    for recommendation in sorted(recommendations, key=lambda item: item.rank):
+        breakdown = recommendation.score_breakdown
+        if breakdown is None:
+            continue
+        rows.append(
+            {
+                "rank": recommendation.rank,
+                "paper_id": recommendation.paper.paper_id,
+                "title": recommendation.paper.title,
+                "semantic": round(breakdown.semantic_seed, 4),
+                "lexical": round(breakdown.lexical, 4),
+                "phrase": round(breakdown.phrase, 4),
+                "category": round(breakdown.category, 4),
+                "recency": round(breakdown.recency, 4),
+                "query_source": round(breakdown.query_source, 4),
+                "feedback": round(breakdown.feedback, 4),
+                "total": round(breakdown.total, 4),
+                "evidence_score": round(breakdown.evidence_score, 4),
+                "evidence_status": _semantic_evidence_status(breakdown),
+            }
+        )
+    return rows
+
+
+def recommendation_why_rows(
+    recommendations: Sequence[Recommendation],
+) -> list[dict[str, object]]:
+    """Build row-level why details without parsing rationale text."""
+
+    rows: list[dict[str, object]] = []
+    for recommendation in sorted(recommendations, key=lambda item: item.rank):
+        breakdown = recommendation.score_breakdown
+        if breakdown is None:
+            continue
+        top = _top_semantic_similarity(breakdown.semantic_similarities)
+        rows.append(
+            {
+                "rank": recommendation.rank,
+                "paper_id": recommendation.paper.paper_id,
+                "title": recommendation.paper.title,
+                "total": round(breakdown.total, 4),
+                "semantic": round(breakdown.semantic_seed, 4),
+                "top_matching_seed": (
+                    _similarity_source_label(top) if top is not None else ""
+                ),
+                "top_similarity": (
+                    round(top.similarity, 4) if top is not None else ""
+                ),
+                "matched_terms": ", ".join(breakdown.matched_terms),
+                "matched_phrases": ", ".join(breakdown.matched_phrases),
+                "signals": ", ".join(breakdown.signals),
+                "evidence_status": _semantic_evidence_status(breakdown),
+            }
+        )
+    return rows
+
+
+def feedback_impact_rows(
+    recommendations: Sequence[Recommendation],
+) -> list[dict[str, object]]:
+    """Render semantic feedback movement and influence rows."""
+
+    rows: list[dict[str, object]] = []
+    for recommendation in sorted(recommendations, key=lambda item: item.rank):
+        influences = recommendation.feedback_influences
+        if not influences and not _has_feedback_movement(recommendation):
+            continue
+        if not influences:
+            rows.append(_feedback_impact_row(recommendation, None))
+            continue
+        for influence in influences:
+            rows.append(_feedback_impact_row(recommendation, influence))
     return rows
 
 
@@ -769,6 +1059,21 @@ def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -
                 format_func=lambda value: SEARCH_MODE_LABELS[value],
                 help="Broad expands into multiple planned queries; strict keeps narrower exact-query behavior.",
             )
+            recommendation_mode = st.selectbox(
+                "Recommendation mode",
+                options=list(RECOMMENDATION_MODE_LABELS),
+                index=_option_index(
+                    list(RECOMMENDATION_MODE_LABELS),
+                    state["recommendation_mode"],
+                    default_value=RECOMMENDATION_MODE_AUTO,
+                ),
+                format_func=lambda value: RECOMMENDATION_MODE_LABELS[value],
+                help=(
+                    "Auto uses semantic ranking for seed-only runs and keeps "
+                    "topic plus seed runs deterministic. Semantic seed requests "
+                    "fail closed when embeddings are not ready."
+                ),
+            )
             candidate_pool_size = st.number_input(
                 "Candidate pool size",
                 min_value=1,
@@ -798,11 +1103,14 @@ def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -
         state["start_date"] = start_date
         state["end_date"] = end_date
         state["search_mode"] = search_mode
+        state["recommendation_mode"] = recommendation_mode
         state["candidate_pool_size"] = int(candidate_pool_size)
         state["max_results"] = int(candidate_pool_size)
         state["arxiv_page_size"] = int(page_size)
         state["arxiv_max_requests"] = int(max_requests)
         _run_recommendation_workflow(state)
+
+    _render_semantic_readiness_panel(st, state)
 
     recommendation_result = state.get("recommendation_result")
     _render_notice(
@@ -810,6 +1118,7 @@ def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -
         recommendation_result,
         empty_message="No recommendation workflow has been run in this session.",
     )
+    _render_semantic_banner(st, recommendation_result)
     seed_result = state.get("seed_result")
     if seed_result is not None:
         _render_notice(
@@ -835,11 +1144,21 @@ def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -
         )
 
     empty_message = recommendation_empty_state_message(recommendation_result)
-    if empty_message:
-        st.info(empty_message)
+    if workflow is None:
+        if empty_message:
+            st.info(empty_message)
         return
 
-    if workflow is None:
+    if empty_message:
+        st.info(empty_message)
+        _render_recommendation_diagnostics(st, workflow)
+        if workflow.trace:
+            st.subheader("Workflow Trace")
+            st.dataframe(
+                workflow_trace_rows(workflow.trace),
+                use_container_width=True,
+                hide_index=True,
+            )
         return
 
     if workflow.briefing is not None:
@@ -851,6 +1170,7 @@ def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -
         use_container_width=True,
         hide_index=True,
     )
+    _render_recommendation_diagnostics(st, workflow)
 
     if workflow.trace:
         st.subheader("Workflow Trace")
@@ -916,6 +1236,14 @@ def _render_feedback_and_explanation(st: Any, state: MutableMapping[str, Any]) -
             use_container_width=True,
             hide_index=True,
         )
+        impact_rows = feedback_impact_rows(feedback_workflow.recommendations)
+        if impact_rows:
+            with st.expander("Feedback impact", expanded=True):
+                st.dataframe(
+                    impact_rows,
+                    use_container_width=True,
+                    hide_index=True,
+                )
         if feedback_workflow.trace:
             with st.expander("Feedback trace", expanded=False):
                 st.dataframe(
@@ -1081,6 +1409,7 @@ def _run_recommendation_workflow(state: MutableMapping[str, Any]) -> None:
             top_k=int(state["top_k"]),
             use_cache=bool(state["use_cache"]),
             include_debug_trace=bool(state["include_debug_trace"]),
+            recommendation_mode=str(state["recommendation_mode"]),
         )
     except Exception as exc:
         _record_action_error(state, exc)
@@ -1224,6 +1553,80 @@ def _build_retrieval_query(state: Mapping[str, Any]) -> RetrievalQuery:
     )
 
 
+def _render_semantic_readiness_panel(
+    st: Any,
+    state: Mapping[str, Any],
+) -> None:
+    seed_preference = _seed_preference_from_result(state.get("seed_result"))
+    readiness = _semantic_readiness_preview(state, seed_preference)
+    rows = semantic_readiness_panel_rows(
+        readiness,
+        cache_path=str(state.get("db_path") or ""),
+        recommendation_mode=str(state.get("recommendation_mode", RECOMMENDATION_MODE_AUTO)),
+        seed_count=len(_seed_lines(str(state.get("seed_input") or ""))),
+    )
+    with st.expander("Semantic readiness", expanded=False):
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+
+def _render_semantic_banner(
+    st: Any,
+    result: SkillResult[RecommendationWorkflow] | None,
+) -> None:
+    notice = semantic_error_notice(result)
+    if notice is None:
+        return
+    renderer = {
+        "success": st.success,
+        "info": st.info,
+        "warning": st.warning,
+        "error": st.error,
+    }.get(notice["kind"], st.info)
+    renderer(notice["message"])
+
+
+def _render_recommendation_diagnostics(
+    st: Any,
+    workflow: RecommendationWorkflow,
+) -> None:
+    st.subheader("Recommendation Diagnostics")
+    provider_tab, similarity_tab, score_tab, feedback_tab = st.tabs(
+        [
+            "Provider / Cache / Retrieval",
+            "Seed Similarity",
+            "Score Composition",
+            "Feedback Impact",
+        ]
+    )
+    with provider_tab:
+        rows = semantic_provider_cache_rows(workflow.trace)
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+        else:
+            st.info("No semantic provider, cache, or retrieval diagnostics are available.")
+    with similarity_tab:
+        rows = semantic_similarity_rows(workflow.recommendations)
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+        else:
+            st.info("No seed-candidate similarity diagnostics are available for this run.")
+    with score_tab:
+        rows = score_composition_rows(workflow.recommendations)
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+            why_rows = recommendation_why_rows(workflow.recommendations)
+            if why_rows:
+                st.dataframe(why_rows, use_container_width=True, hide_index=True)
+        else:
+            st.info("No structured score composition is available for this run.")
+    with feedback_tab:
+        rows = feedback_impact_rows(workflow.recommendations)
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+        else:
+            st.info("No feedback movement has been applied to the current recommendations.")
+
+
 def _render_daily_briefing(st: Any, briefing: DailyBriefing) -> None:
     sections = {section["key"]: section for section in enhanced_briefing_sections(briefing)}
 
@@ -1358,6 +1761,7 @@ def _ensure_session_state(state: MutableMapping[str, Any]) -> None:
         "arxiv_page_size": config.arxiv_page_size,
         "arxiv_max_requests": config.arxiv_max_requests_per_search,
         "query_planner_mode": config.query_planner_mode.value,
+        "recommendation_mode": RECOMMENDATION_MODE_AUTO,
         "include_debug_trace": False,
         "top_k": DEFAULT_TOP_K,
         "use_cache": True,
@@ -1417,6 +1821,50 @@ def _seed_count_from_result(result: SkillResult[Any] | None) -> int:
     if not seeds:
         return 0
     return len(seeds)
+
+
+def _seed_preference_from_result(
+    result: SkillResult[Any] | None,
+) -> SeedPreference | None:
+    if result is None:
+        return None
+    data = result.data
+    if isinstance(data, SeedPreference):
+        return data
+    return None
+
+
+def _semantic_readiness_preview(
+    state: Mapping[str, Any],
+    seed_preference: SeedPreference | None,
+) -> dict[str, Any]:
+    config = AppConfig.from_env()
+    db_path = _normalized_text(str(state.get("db_path") or "")) or config.db_path
+    try:
+        store = SQLitePaperStore(db_path)
+        readiness = SemanticSeedRankingSkill(
+            store=store,
+            config=config,
+        ).check_readiness(seed_preference)
+    except Exception as exc:  # pragma: no cover - defensive UI guard.
+        return {
+            "provider": config.embedding_provider,
+            "provider_mode": (
+                "fake"
+                if config.embedding_provider.strip().lower() == "fake"
+                else "live"
+            ),
+            "provider_label": f"{config.embedding_provider}:{config.embedding_model}",
+            "credential_status": "unknown",
+            "model": config.embedding_model,
+            "endpoint_safety": "unknown",
+            "cache_enabled": config.embedding_cache_enabled,
+            "seed_quality": "unknown",
+            "can_run": False,
+            "error_code": "semantic_readiness_preview_failed",
+            "warnings": [str(exc)],
+        }
+    return readiness.model_dump(mode="json")
 
 
 def _option_index(
@@ -1499,6 +1947,322 @@ def _metadata_for_skill(
         if step.skill == skill:
             return step.metadata
     return {}
+
+
+def _semantic_recommendation_row_fields(
+    recommendation: Recommendation,
+) -> dict[str, object]:
+    breakdown = recommendation.score_breakdown
+    if breakdown is None:
+        return {}
+    has_semantic = bool(
+        breakdown.semantic_similarities
+        or abs(breakdown.semantic_seed) > 0.0001
+    )
+    has_feedback = (
+        recommendation.score_delta is not None
+        or abs(breakdown.feedback) > 0.0001
+    )
+    if not has_semantic and not has_feedback:
+        return {}
+
+    fields: dict[str, object] = {}
+    if has_semantic:
+        top = _top_semantic_similarity(breakdown.semantic_similarities)
+        fields.update(
+            {
+                "semantic_score": round(breakdown.semantic_seed, 4),
+                "semantic_similarity": (
+                    round(top.similarity, 4)
+                    if top is not None
+                    else round(breakdown.evidence_score, 4)
+                ),
+                "top_matching_seed": (
+                    _similarity_source_label(top) if top is not None else ""
+                ),
+                "evidence_status": _semantic_evidence_status(breakdown),
+            }
+        )
+    if has_feedback:
+        fields["feedback_delta"] = round(
+            recommendation.score_delta
+            if recommendation.score_delta is not None
+            else breakdown.feedback,
+            4,
+        )
+    return fields
+
+
+def _top_semantic_similarity(similarities: Sequence[Any]) -> Any | None:
+    if not similarities:
+        return None
+    return max(similarities, key=lambda item: float(getattr(item, "similarity", 0.0)))
+
+
+def _similarity_source_label(detail: Any | None) -> str:
+    if detail is None:
+        return ""
+    title = getattr(detail, "source_title", None)
+    if title:
+        return str(title)
+    return str(getattr(detail, "source_id", ""))
+
+
+def _semantic_evidence_status(breakdown: Any) -> str:
+    if getattr(breakdown, "fallback", False):
+        return "low_evidence"
+    evidence_score = float(getattr(breakdown, "evidence_score", 0.0) or 0.0)
+    if evidence_score >= 0.75:
+        return "high_semantic_evidence"
+    if evidence_score >= 0.5:
+        return "medium_semantic_evidence"
+    if evidence_score >= 0.25:
+        return "low_semantic_evidence"
+    if abs(float(getattr(breakdown, "semantic_seed", 0.0) or 0.0)) > 0.0001:
+        return "minimal_semantic_evidence"
+    return "no_semantic_evidence"
+
+
+def _semantic_provider_summary_for_step(step: WorkflowTraceStep) -> str:
+    metadata = step.metadata
+    provider = metadata.get("semantic_provider")
+    if isinstance(provider, Mapping):
+        label = provider.get("provider_label") or provider.get("provider")
+        mode = provider.get("provider_mode")
+        if label and mode:
+            return f"{label} ({mode})"
+        return _metadata_text(label)
+    label = metadata.get("provider_label") or metadata.get("provider")
+    mode = metadata.get("provider_mode")
+    if label and mode:
+        return f"{label} ({mode})"
+    return _metadata_text(label)
+
+
+def _semantic_model_for_step(step: WorkflowTraceStep) -> str:
+    provider = step.metadata.get("semantic_provider")
+    if isinstance(provider, Mapping):
+        return _metadata_text(provider.get("model"))
+    return _metadata_text(step.metadata.get("model"))
+
+
+def _embedding_cache_summary_for_step(step: WorkflowTraceStep) -> str:
+    cache = step.metadata.get("embedding_cache")
+    if isinstance(cache, Mapping):
+        enabled = "enabled" if cache.get("enabled", True) else "disabled"
+        return (
+            f"{enabled}; hits={_metadata_text(cache.get('hits'))}; "
+            f"misses={_metadata_text(cache.get('misses'))}; "
+            f"writes={_metadata_text(cache.get('writes'))}"
+        )
+    if "cache_enabled" in step.metadata:
+        return "enabled" if step.metadata.get("cache_enabled") else "disabled"
+    return ""
+
+
+def _semantic_state_for_step(step: WorkflowTraceStep) -> str:
+    metadata = step.metadata
+    if step.error_code:
+        return step.error_code
+    semantic_error = metadata.get("semantic_error")
+    if isinstance(semantic_error, Mapping):
+        return _metadata_text(
+            semantic_error.get("failure_reason")
+            or semantic_error.get("error_code")
+        )
+    if "can_run" in metadata:
+        return "ready" if metadata.get("can_run") else _metadata_text(
+            metadata.get("error_code") or "not_ready"
+        )
+    if metadata.get("candidate_pool_diagnostic"):
+        return _metadata_text(metadata.get("candidate_pool_diagnostic"))
+    fallback_count = _metadata_int(metadata.get("fallback_count"), default=0)
+    qualifying_count = _metadata_int(metadata.get("qualifying_count"), default=0)
+    if step.skill == "ranking" and fallback_count and not qualifying_count:
+        return "low_semantic_evidence"
+    return ""
+
+
+def _first_semantic_trace_error_code(
+    trace: Sequence[WorkflowTraceStep],
+) -> str | None:
+    for step in trace:
+        if step.error_code and step.error_code.startswith("semantic_"):
+            return step.error_code
+        semantic_error = step.metadata.get("semantic_error")
+        if isinstance(semantic_error, Mapping):
+            code = semantic_error.get("error_code") or semantic_error.get(
+                "failure_reason"
+            )
+            if code:
+                return str(code)
+    return None
+
+
+def _semantic_error_notice_for_code(code: str) -> dict[str, str]:
+    if code == "semantic_embedding_credentials_missing":
+        message = (
+            "Semantic recommendations were withheld because embedding credentials "
+            "are missing. Set EMBEDDING_API_KEY, or explicitly opt in to "
+            "EMBEDDING_REUSE_OPENAI_API_KEY."
+        )
+    elif code == "semantic_embedding_endpoint_unsafe":
+        message = (
+            "Semantic recommendations were withheld because the embedding endpoint "
+            "is not marked safe. Use the default OpenAI endpoint or configure a "
+            "safe HTTPS embedding base URL."
+        )
+    elif code == "semantic_seed_quality_error":
+        message = (
+            "Semantic recommendations were withheld because the seed metadata does "
+            "not include usable title, abstract, or category text. Add richer seed "
+            "papers or use deterministic mode."
+        )
+    elif code in {
+        "semantic_embedding_provider_failed",
+        "embedding_provider_failed",
+    }:
+        message = (
+            "Semantic recommendations were withheld because the embedding provider "
+            "failed or timed out. Check provider availability, timeout settings, "
+            "and credentials."
+        )
+    elif code == "semantic_embedding_configuration_failed":
+        message = (
+            "Semantic recommendations were withheld because embedding provider "
+            "configuration is invalid. Check provider, model, dimensions, and "
+            "cache settings."
+        )
+    elif code == "semantic_feedback_refinement_failed":
+        message = (
+            "Semantic feedback refinement failed before score movement could be "
+            "applied. Original recommendations should be preserved when available."
+        )
+    else:
+        message = (
+            "Semantic recommendations were withheld by a fail-closed semantic "
+            f"state: {code}."
+        )
+    return {"kind": "error", "message": message}
+
+
+def _semantic_retrieval_state(trace: Sequence[WorkflowTraceStep]) -> str | None:
+    for step in trace:
+        if step.skill != "arxiv_retrieval":
+            continue
+        metadata = step.metadata
+        if (
+            metadata.get("seed_derived_retrieval")
+            and _metadata_int(metadata.get("candidate_count"), default=0) == 0
+        ):
+            return "no_seed_candidates"
+    return None
+
+
+def _all_semantic_recommendations_low_evidence(
+    recommendations: Sequence[Recommendation],
+) -> bool:
+    semantic_recommendations = [
+        recommendation
+        for recommendation in recommendations
+        if recommendation.score_breakdown is not None
+        and (
+            recommendation.score_breakdown.semantic_similarities
+            or abs(recommendation.score_breakdown.semantic_seed) > 0.0001
+        )
+    ]
+    if not semantic_recommendations:
+        return False
+    return all(
+        recommendation.score_breakdown is not None
+        and recommendation.score_breakdown.fallback
+        for recommendation in semantic_recommendations
+    )
+
+
+def _has_feedback_movement(recommendation: Recommendation) -> bool:
+    return (
+        recommendation.previous_rank is not None
+        or recommendation.rank_delta is not None
+        or recommendation.score_delta is not None
+        or recommendation.refinement_status is not None
+        or recommendation.feedback_error is not None
+    )
+
+
+def _feedback_impact_row(
+    recommendation: Recommendation,
+    influence: Any | None,
+) -> dict[str, object]:
+    return {
+        "paper_id": recommendation.paper.paper_id,
+        "title": recommendation.paper.title,
+        "original_rank": recommendation.previous_rank or "",
+        "refined_rank": recommendation.rank,
+        "rank_delta": recommendation.rank_delta if recommendation.rank_delta is not None else "",
+        "score_delta": (
+            round(recommendation.score_delta, 4)
+            if recommendation.score_delta is not None
+            else ""
+        ),
+        "source_feedback_paper": (
+            getattr(influence, "source_paper_id", "") if influence is not None else ""
+        ),
+        "source_title": (
+            getattr(influence, "source_title", "") if influence is not None else ""
+        ),
+        "similarity": (
+            round(getattr(influence, "similarity", 0.0), 4)
+            if influence is not None
+            else ""
+        ),
+        "signed_influence": (
+            round(getattr(influence, "signed_score_delta", 0.0), 4)
+            if influence is not None
+            else ""
+        ),
+        "feedback_value": (
+            getattr(getattr(influence, "value", ""), "value", "")
+            if influence is not None
+            else ""
+        ),
+        "status": _feedback_status_text(recommendation, influence),
+    }
+
+
+def _feedback_status_text(recommendation: Recommendation, influence: Any | None) -> str:
+    if influence is not None:
+        status = getattr(influence, "refinement_status", "")
+        return str(getattr(status, "value", status))
+    if recommendation.feedback_error is not None:
+        return f"failed: {recommendation.feedback_error.code}"
+    status = recommendation.refinement_status
+    if status is not None:
+        return status.value
+    return "movement"
+
+
+def _recommendation_mode_label(value: str) -> str:
+    normalized = _normalize_recommendation_mode(value)
+    return RECOMMENDATION_MODE_LABELS.get(normalized, RECOMMENDATION_MODE_LABELS[RECOMMENDATION_MODE_AUTO])
+
+
+def _recommendation_mode_help(value: str) -> str:
+    normalized = _normalize_recommendation_mode(value)
+    if normalized == RECOMMENDATION_MODE_DETERMINISTIC:
+        return "semantic ranking disabled for this run"
+    if normalized == RECOMMENDATION_MODE_SEMANTIC_SEED:
+        return "semantic seed ranking explicitly requested"
+    return "seed-only uses semantic; topic plus seed stays deterministic"
+
+
+def _normalize_recommendation_mode(value: str | None) -> str:
+    normalized = (value or RECOMMENDATION_MODE_AUTO).strip().lower().replace("-", "_")
+    if normalized == "semantic":
+        normalized = RECOMMENDATION_MODE_SEMANTIC_SEED
+    if normalized not in RECOMMENDATION_MODE_LABELS:
+        return RECOMMENDATION_MODE_AUTO
+    return normalized
 
 
 def _planner_source_for_step(step: WorkflowTraceStep) -> str:

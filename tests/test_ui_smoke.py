@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 import importlib
+import json
 import sys
 
 from daily_arxiv_agent.contracts import (
@@ -13,13 +14,18 @@ from daily_arxiv_agent.contracts import (
     EvidenceSource,
     EvidenceSupportStatus,
     FieldEvidenceStatus,
+    FeedbackInfluenceRecord,
+    FeedbackRefinementStatus,
+    FeedbackValue,
     PaperMetadata,
     Provenance,
     QueryPlannerMode,
+    RankingScoreBreakdown,
     ReadingPriority,
     Recommendation,
     RetrievalQuery,
     SearchMode,
+    SemanticSimilarityDetail,
     SkillError,
     SkillResult,
     SkillStatus,
@@ -40,10 +46,17 @@ import daily_arxiv_agent.ui.streamlit_app as ui_module
 from daily_arxiv_agent.ui.streamlit_app import (
     briefing_rows,
     enhanced_briefing_sections,
+    feedback_impact_rows,
+    recommendation_why_rows,
     recommendation_empty_state_message,
     recommendation_rows,
     recommendation_summary_metrics,
     result_notice,
+    score_composition_rows,
+    semantic_error_notice,
+    semantic_provider_cache_rows,
+    semantic_readiness_panel_rows,
+    semantic_similarity_rows,
     workflow_trace_rows,
 )
 
@@ -294,6 +307,43 @@ def test_recommendation_rows_render_structured_objects() -> None:
     ]
 
 
+def test_recommendation_rows_include_semantic_score_fields() -> None:
+    recommendation = make_recommendation(
+        "2604.00001",
+        "Agent Workflows for Research Recommendation",
+        90.0,
+    ).model_copy(
+        update={
+            "score_delta": 1.25,
+            "score_breakdown": RankingScoreBreakdown(
+                semantic_seed=82.0,
+                lexical=1.0,
+                total=90.0,
+                evidence_score=0.82,
+                semantic_similarities=[
+                    SemanticSimilarityDetail(
+                        source_id="2604.00999",
+                        target_id="2604.00001",
+                        similarity=0.82,
+                        source_title="Seed Agent Workflow",
+                        target_title="Agent Workflows for Research Recommendation",
+                        score=82.0,
+                    )
+                ],
+                signals=["semantic_seed", "lexical"],
+            ),
+        }
+    )
+
+    rows = recommendation_rows([recommendation])
+
+    assert rows[0]["semantic_score"] == 82.0
+    assert rows[0]["semantic_similarity"] == 0.82
+    assert rows[0]["top_matching_seed"] == "Seed Agent Workflow"
+    assert rows[0]["feedback_delta"] == 1.25
+    assert rows[0]["evidence_status"] == "high_semantic_evidence"
+
+
 def test_briefing_rows_keep_legacy_summary_table_columns() -> None:
     briefing = make_enhanced_briefing(trend_status=TrendAssessmentStatus.AVAILABLE)
 
@@ -382,6 +432,10 @@ def test_workflow_trace_rows_render_evidence_and_fallback_details() -> None:
             "candidates": "",
             "cache": "",
             "ranking_mode": "query_plan",
+            "recommendation_mode": "",
+            "semantic_provider": "",
+            "embedding_cache": "",
+            "semantic_state": "ranking_fallback",
         }
     ]
 
@@ -427,6 +481,270 @@ def test_workflow_trace_rows_surface_search_metadata_without_raw_queries() -> No
     assert rows[1]["candidates"] == "12"
     assert rows[1]["cache"] == "miss/complete"
     assert "planner_rationale" not in rows[0]
+
+
+def test_workflow_trace_rows_surface_semantic_metadata_without_raw_payloads() -> None:
+    trace = [
+        WorkflowTraceStep(
+            step=1,
+            skill="semantic_readiness",
+            status=SkillStatus.SUCCESS,
+            input_summary="seed=True",
+            output_summary="semantic recommendation ready",
+            evidence_source=EvidenceSource.METADATA,
+            metadata={
+                "recommendation_mode": "semantic_seed",
+                "provider": "fake",
+                "provider_mode": "fake",
+                "provider_label": "fake:fake-semantic",
+                "credential_status": "injected",
+                "model": "fake-semantic",
+                "endpoint_safety": "not_applicable",
+                "cache_enabled": True,
+                "can_run": True,
+                "raw_vector": [0.1, 0.2],
+                "provider_payload": {"authorization": "Bearer secret"},
+                "per_input_cache_key": "raw-cache-key",
+            },
+        ),
+        WorkflowTraceStep(
+            step=2,
+            skill="ranking",
+            status=SkillStatus.ERROR,
+            input_summary="semantic",
+            output_summary="0 recommendation(s) ranked",
+            evidence_source=EvidenceSource.METADATA,
+            fallback=True,
+            error_code="semantic_embedding_provider_failed",
+            error_message="provider timed out",
+            metadata={
+                "ranking_mode": "semantic_seed",
+                "semantic_provider": {
+                    "provider": "fake",
+                    "provider_mode": "fake",
+                    "provider_label": "fake:fake-semantic",
+                    "model": "fake-semantic",
+                },
+                "embedding_cache": {
+                    "enabled": True,
+                    "hits": 2,
+                    "misses": 3,
+                    "writes": 3,
+                },
+            },
+        ),
+    ]
+
+    rows = workflow_trace_rows(trace)
+    trace_text = json.dumps(rows, sort_keys=True)
+
+    assert rows[0]["semantic_provider"] == "fake:fake-semantic (fake)"
+    assert rows[0]["embedding_cache"] == "enabled"
+    assert rows[0]["semantic_state"] == "ready"
+    assert rows[1]["semantic_provider"] == "fake:fake-semantic (fake)"
+    assert "hits=2" in rows[1]["embedding_cache"]
+    assert rows[1]["semantic_state"] == "semantic_embedding_provider_failed"
+    assert "raw-cache-key" not in trace_text
+    assert "Bearer secret" not in trace_text
+    assert "0.1" not in trace_text
+
+
+def test_semantic_diagnostic_rows_use_structured_score_not_rationale() -> None:
+    recommendation = make_recommendation(
+        "2604.00001",
+        "Agent Workflows for Research Recommendation",
+        90.0,
+    ).model_copy(
+        update={
+            "rationale": "RAW_RATIONALE_SHOULD_NOT_POWER_DIAGNOSTICS",
+            "score_breakdown": RankingScoreBreakdown(
+                semantic_seed=80.0,
+                lexical=1.5,
+                phrase=0.5,
+                query_source=0.25,
+                recency=0.1,
+                category=1.0,
+                feedback=0.75,
+                total=84.1,
+                evidence_score=0.8,
+                matched_terms=["agent"],
+                matched_phrases=["research recommendation"],
+                semantic_similarities=[
+                    SemanticSimilarityDetail(
+                        source_id="seed-paper",
+                        target_id="2604.00001",
+                        similarity=0.8,
+                        source_title="Seed Agent Workflow",
+                        target_title="Agent Workflows for Research Recommendation",
+                        score=80.0,
+                    )
+                ],
+                signals=["semantic_seed", "feedback"],
+            ),
+        }
+    )
+
+    rows = [
+        *recommendation_why_rows([recommendation]),
+        *semantic_similarity_rows([recommendation]),
+        *score_composition_rows([recommendation]),
+    ]
+    diagnostics_text = json.dumps(rows, sort_keys=True)
+
+    assert "Seed Agent Workflow" in diagnostics_text
+    assert "RAW_RATIONALE_SHOULD_NOT_POWER_DIAGNOSTICS" not in diagnostics_text
+
+
+def test_semantic_readiness_panel_rows_report_provider_and_cache() -> None:
+    rows = semantic_readiness_panel_rows(
+        {
+            "provider": "fake",
+            "provider_mode": "fake",
+            "provider_label": "fake:fake-semantic",
+            "credential_status": "injected",
+            "model": "fake-semantic",
+            "endpoint_safety": "not_applicable",
+            "cache_enabled": True,
+            "seed_quality": "usable",
+            "can_run": True,
+            "warnings": ["fake embeddings are for local verification"],
+        },
+        cache_path="data/daily_arxiv.sqlite3",
+        recommendation_mode=ui_module.RECOMMENDATION_MODE_SEMANTIC_SEED,
+        seed_count=2,
+    )
+
+    by_item = {row["item"]: row for row in rows}
+    assert by_item["recommendation_mode"]["status"] == "Semantic seed"
+    assert by_item["readiness"]["status"] == "ready"
+    assert by_item["provider"]["status"] == "fake:fake-semantic"
+    assert by_item["provider"]["details"] == "fake"
+    assert by_item["credentials"]["status"] == "injected"
+    assert by_item["cache"]["status"] == "enabled"
+    assert by_item["cache"]["details"] == "data/daily_arxiv.sqlite3"
+    assert by_item["warnings"]["status"] == "1"
+
+
+def test_semantic_error_notice_explains_fail_closed_states() -> None:
+    result = SkillResult(
+        status=SkillStatus.ERROR,
+        data=RecommendationWorkflow(
+            run_id="run-semantic-error",
+            topic="personalized research",
+            query=RetrievalQuery(topic=None, category="cs.LG"),
+            trace=[],
+        ),
+        evidence_source=EvidenceSource.METADATA,
+        error=SkillError(
+            code="semantic_embedding_credentials_missing",
+            message="missing credentials",
+            retryable=True,
+        ),
+    )
+
+    notice = semantic_error_notice(result)
+
+    assert notice is not None
+    assert notice["kind"] == "error"
+    assert "withheld" in notice["message"]
+    assert "EMBEDDING_API_KEY" in notice["message"]
+
+
+def test_semantic_error_notice_ignores_nonsemantic_errors() -> None:
+    result = SkillResult(
+        status=SkillStatus.ERROR,
+        data=RecommendationWorkflow(
+            run_id="run-retrieval-error",
+            topic="agent briefing",
+            query=RetrievalQuery(topic="agent briefing"),
+            trace=[],
+        ),
+        evidence_source=EvidenceSource.METADATA,
+        error=SkillError(
+            code="retrieval_skill_failed",
+            message="retrieval failed",
+            retryable=True,
+        ),
+    )
+
+    assert semantic_error_notice(result) is None
+
+
+def test_semantic_error_notice_preserves_feedback_failure_context() -> None:
+    result = SkillResult(
+        status=SkillStatus.ERROR,
+        data=RecommendationWorkflow(
+            run_id="run-semantic-feedback-error",
+            topic="personalized research",
+            query=RetrievalQuery(topic=None, category="cs.LG"),
+            recommendations=[
+                make_recommendation(
+                    "2604.00001",
+                    "Agent Workflows for Research Recommendation",
+                    8.75,
+                )
+            ],
+            trace=[],
+        ),
+        evidence_source=EvidenceSource.METADATA,
+        error=SkillError(
+            code="semantic_feedback_refinement_failed",
+            message="feedback provider failed",
+            retryable=True,
+        ),
+    )
+
+    notice = semantic_error_notice(result)
+
+    assert notice is not None
+    assert notice["kind"] == "warning"
+    assert "preserved" in notice["message"]
+    assert "withheld" not in notice["message"]
+
+
+def test_feedback_impact_rows_show_semantic_movement() -> None:
+    recommendation = make_recommendation(
+        "2604.00002",
+        "Feedback Agents for Paper Recommendation",
+        9.0,
+    ).model_copy(
+        update={
+            "previous_rank": 3,
+            "rank_delta": 2,
+            "score_delta": 1.5,
+            "feedback_influences": [
+                FeedbackInfluenceRecord(
+                    source_paper_id="2604.00001",
+                    target_paper_id="2604.00002",
+                    similarity=0.76,
+                    signed_score_delta=1.5,
+                    value=FeedbackValue.LIKE,
+                    refinement_status=FeedbackRefinementStatus.APPLIED,
+                    source_title="Liked Agent Workflow",
+                    target_title="Feedback Agents for Paper Recommendation",
+                )
+            ],
+        }
+    )
+
+    rows = feedback_impact_rows([recommendation])
+
+    assert rows == [
+        {
+            "paper_id": "2604.00002",
+            "title": "Feedback Agents for Paper Recommendation",
+            "original_rank": 3,
+            "refined_rank": 1,
+            "rank_delta": 2,
+            "score_delta": 1.5,
+            "source_feedback_paper": "2604.00001",
+            "source_title": "Liked Agent Workflow",
+            "similarity": 0.76,
+            "signed_influence": 1.5,
+            "feedback_value": "like",
+            "status": "applied",
+        }
+    ]
 
 
 def test_empty_recommendation_state_is_clear() -> None:

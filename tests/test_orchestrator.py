@@ -729,6 +729,105 @@ def test_explicit_topic_with_seed_keeps_topic_query_planning(tmp_path) -> None:
     assert "compiler" not in plan.required_terms
 
 
+def test_deterministic_mode_disables_topicless_seed_semantic_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+    seed = make_paper(
+        "2604.92101",
+        "Robotic Manipulation for Household Assistance",
+        "Robotic manipulation systems coordinate perception and control.",
+        category="cs.RO",
+    )
+    retrieval = StaticRetrievalSkill(make_trend_papers())
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        retrieval_skill=retrieval,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic=None,
+            category="cs.RO",
+            search_mode=SearchMode.BROAD,
+        ),
+        seed_preference=make_seed_preference([seed]),
+        top_k=2,
+        use_cache=False,
+        run_id="run-deterministic-seed",
+        recommendation_mode="deterministic",
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    workflow = result.data
+    assert workflow is not None
+    assert "semantic_readiness" not in [step.skill for step in workflow.trace]
+    assert retrieval.query_plans
+    assert retrieval.query_plans[0].planner.source == "deterministic"
+    ranking_step = next(step for step in workflow.trace if step.skill == "ranking")
+    assert ranking_step.metadata["recommendation_mode"] == "deterministic"
+    assert ranking_step.metadata["ranking_mode"] != "semantic_seed"
+
+
+def test_semantic_seed_mode_with_topic_uses_topic_retrieval_and_semantic_ranking(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    seed = make_paper(
+        "2604.92201",
+        "Robotic Manipulation for Household Assistance",
+        "Robotic manipulation systems coordinate perception and control.",
+        category="cs.RO",
+    )
+    candidate = make_paper(
+        "2604.92202",
+        "Embodied Task Planning",
+        "Robots infer manipulation steps from scene goals.",
+        category="cs.RO",
+    )
+    retrieval = StaticRetrievalSkill([candidate])
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        retrieval_skill=retrieval,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic="robotic manipulation",
+            category="cs.RO",
+            search_mode=SearchMode.BROAD,
+            candidate_pool_size=1,
+        ),
+        seed_preference=make_seed_preference([seed]),
+        top_k=1,
+        use_cache=False,
+        run_id="run-semantic-topic-seed",
+        recommendation_mode="semantic_seed",
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    workflow = result.data
+    assert workflow is not None
+    assert [step.skill for step in workflow.trace][:4] == [
+        "query_planning",
+        "semantic_readiness",
+        "arxiv_retrieval",
+        "ranking",
+    ]
+    plan = retrieval.query_plans[0]
+    assert plan.planner.source == "deterministic"
+    assert plan.required_terms == ["robotic", "manipulation"]
+    ranking_step = workflow.trace[3]
+    assert ranking_step.metadata["recommendation_mode"] == "semantic_seed"
+    assert ranking_step.metadata["ranking_mode"] == "semantic_topic_seed"
+    assert ranking_step.metadata["semantic_provider"]["provider_mode"] == "fake"
+
+
 def test_seed_paper_ids_are_excluded_and_insufficient_pool_is_labeled(
     tmp_path,
     monkeypatch,

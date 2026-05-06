@@ -46,6 +46,14 @@ from daily_arxiv_agent.storage import SQLitePaperStore
 
 
 ResultT = TypeVar("ResultT")
+RECOMMENDATION_MODE_AUTO = "auto"
+RECOMMENDATION_MODE_DETERMINISTIC = "deterministic"
+RECOMMENDATION_MODE_SEMANTIC_SEED = "semantic_seed"
+RECOMMENDATION_MODES = {
+    RECOMMENDATION_MODE_AUTO,
+    RECOMMENDATION_MODE_DETERMINISTIC,
+    RECOMMENDATION_MODE_SEMANTIC_SEED,
+}
 
 
 class WorkflowTraceStep(BaseModel):
@@ -161,6 +169,7 @@ class DailyArxivAgentOrchestrator:
         run_id: str | None = None,
         include_profile_feedback: bool = True,
         include_debug_trace: bool = False,
+        recommendation_mode: str = RECOMMENDATION_MODE_AUTO,
     ) -> SkillResult[RecommendationWorkflow]:
         """Run retrieval, ranking, extraction, and briefing with trace output."""
 
@@ -169,10 +178,20 @@ class DailyArxivAgentOrchestrator:
         workflow_topic = ranking_topic or "personalized research"
         trace: list[WorkflowTraceStep] = []
         active_seed = seed_preference or self.store.load_seed_preference(profile_id)
+        resolved_recommendation_mode = _normalize_recommendation_mode(
+            recommendation_mode
+        )
         use_seed_derived_plan = _should_use_seed_derived_query_plan(
             query,
             ranking_topic,
             active_seed,
+            recommendation_mode=resolved_recommendation_mode,
+        )
+        use_semantic_ranking = _should_use_semantic_ranking(
+            query,
+            ranking_topic,
+            active_seed,
+            recommendation_mode=resolved_recommendation_mode,
         )
 
         raw_planning_result = _safe_skill_call(
@@ -198,7 +217,10 @@ class DailyArxivAgentOrchestrator:
             output_summary=_query_plan_output_summary(planning_result),
             metadata=_trace_metadata(
                 "query_planning",
-                planning_result.metadata,
+                _metadata_with_recommendation_mode(
+                    planning_result.metadata,
+                    resolved_recommendation_mode,
+                ),
                 include_debug=include_debug_trace,
             ),
         )
@@ -218,7 +240,6 @@ class DailyArxivAgentOrchestrator:
             )
 
         semantic_readiness_result: SkillResult[dict[str, Any]] | None = None
-        use_semantic_ranking = use_seed_derived_plan
         if use_semantic_ranking:
             semantic_readiness_result = _semantic_readiness_result(
                 self.semantic_ranking_skill.check_readiness(active_seed)
@@ -238,7 +259,10 @@ class DailyArxivAgentOrchestrator:
                 ),
                 metadata=_trace_metadata(
                     "semantic_readiness",
-                    semantic_readiness_result.metadata,
+                    _metadata_with_recommendation_mode(
+                        semantic_readiness_result.metadata,
+                        resolved_recommendation_mode,
+                    ),
                     include_debug=include_debug_trace,
                 ),
             )
@@ -282,7 +306,10 @@ class DailyArxivAgentOrchestrator:
             output_summary=f"{len(papers)} paper(s) retrieved",
             metadata=_trace_metadata(
                 "arxiv_retrieval",
-                retrieval_result.metadata,
+                _metadata_with_recommendation_mode(
+                    retrieval_result.metadata,
+                    resolved_recommendation_mode,
+                ),
                 include_debug=include_debug_trace,
             ),
         )
@@ -346,7 +373,10 @@ class DailyArxivAgentOrchestrator:
             output_summary=f"{len(recommendations)} recommendation(s) ranked",
             metadata=_trace_metadata(
                 "ranking",
-                ranking_result.metadata,
+                _metadata_with_recommendation_mode(
+                    ranking_result.metadata,
+                    resolved_recommendation_mode,
+                ),
                 include_debug=include_debug_trace,
             ),
         )
@@ -403,7 +433,10 @@ class DailyArxivAgentOrchestrator:
                 output_summary=f"{len(recommendations)} refined recommendation(s)",
                 metadata=_trace_metadata(
                     "feedback_refinement",
-                    semantic_feedback_result.metadata,
+                    _metadata_with_recommendation_mode(
+                        semantic_feedback_result.metadata,
+                        resolved_recommendation_mode,
+                    ),
                     include_debug=include_debug_trace,
                 ),
             )
@@ -890,8 +923,50 @@ def _should_use_seed_derived_query_plan(
     query: RetrievalQuery,
     ranking_topic: str | None,
     seed_preference: SeedPreference | None,
+    *,
+    recommendation_mode: str = RECOMMENDATION_MODE_AUTO,
 ) -> bool:
-    return seed_preference is not None and not _has_text(ranking_topic or query.topic)
+    if recommendation_mode == RECOMMENDATION_MODE_DETERMINISTIC:
+        return False
+    return (
+        seed_preference is not None
+        and not _has_text(ranking_topic or query.topic)
+    )
+
+
+def _should_use_semantic_ranking(
+    query: RetrievalQuery,
+    ranking_topic: str | None,
+    seed_preference: SeedPreference | None,
+    *,
+    recommendation_mode: str = RECOMMENDATION_MODE_AUTO,
+) -> bool:
+    if recommendation_mode == RECOMMENDATION_MODE_DETERMINISTIC:
+        return False
+    if recommendation_mode == RECOMMENDATION_MODE_SEMANTIC_SEED:
+        return True
+    return (
+        seed_preference is not None
+        and not _has_text(ranking_topic or query.topic)
+    )
+
+
+def _normalize_recommendation_mode(value: str | None) -> str:
+    normalized = (value or RECOMMENDATION_MODE_AUTO).strip().lower().replace("-", "_")
+    if normalized == "semantic":
+        normalized = RECOMMENDATION_MODE_SEMANTIC_SEED
+    if normalized not in RECOMMENDATION_MODES:
+        return RECOMMENDATION_MODE_AUTO
+    return normalized
+
+
+def _metadata_with_recommendation_mode(
+    metadata: Mapping[str, Any],
+    recommendation_mode: str,
+) -> dict[str, Any]:
+    enriched = dict(metadata)
+    enriched.setdefault("recommendation_mode", recommendation_mode)
+    return enriched
 
 
 def _has_text(value: str | None) -> bool:
@@ -970,6 +1045,7 @@ def _trace_metadata(
             return _pick_metadata(
                 metadata,
                 (
+                    "recommendation_mode",
                     "requested_mode",
                     "source",
                     "fallback",
@@ -987,6 +1063,7 @@ def _trace_metadata(
         return _pick_metadata(
             metadata,
             (
+                "recommendation_mode",
                 "requested_mode",
                 "source",
                 "fallback",
@@ -1005,6 +1082,7 @@ def _trace_metadata(
         redacted = _pick_metadata(
             metadata,
             (
+                "recommendation_mode",
                 "cache_hit",
                 "query_variant_count",
                 "request_count",
@@ -1045,6 +1123,7 @@ def _trace_metadata(
         return _pick_metadata(
             metadata,
             (
+                "recommendation_mode",
                 "provider",
                 "provider_mode",
                 "provider_label",
@@ -1063,6 +1142,7 @@ def _trace_metadata(
         return _pick_metadata(
             metadata,
             (
+                "recommendation_mode",
                 "topic",
                 "top_k",
                 "seed_profile_id",
@@ -1088,6 +1168,7 @@ def _trace_metadata(
         return _pick_metadata(
             metadata,
             (
+                "recommendation_mode",
                 "profile_id",
                 "recommendation_run_id",
                 "feedback_count",

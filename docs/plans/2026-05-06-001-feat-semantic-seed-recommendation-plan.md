@@ -434,7 +434,7 @@ sort_key = semantic_bucket, semantic_seed_score, secondary_score, recency, title
 **Verification:**
 - Like/dislike effects are numerically visible and explainable without parsing rationale text.
 
-- [ ] **Unit 6: UI and Trace Diagnostics**
+- [x] **Unit 6: UI and Trace Diagnostics**
 
 **Goal:** Add a recommendation diagnostics view that visualizes semantic seed relatedness, score composition, and feedback movement.
 

@@ -41,6 +41,7 @@ from daily_arxiv_agent.skills.query_planning import (
     build_seed_derived_query_plan,
 )
 from daily_arxiv_agent.skills.ranking import TopicRankingSkill
+from daily_arxiv_agent.skills.semantic_seed_ranking import SemanticSeedRankingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
 
 
@@ -118,6 +119,7 @@ class DailyArxivAgentOrchestrator:
         feedback_skill: FeedbackRefinementSkill | None = None,
         followup_skill: FollowupSkill | None = None,
         query_planning_skill: QueryPlanningSkill | None = None,
+        semantic_ranking_skill: SemanticSeedRankingSkill | None = None,
         deep_explanation_skill: PaperDeepExplanationSkill | None = None,
         provider: LLMProvider | None = None,
     ) -> None:
@@ -131,6 +133,10 @@ class DailyArxivAgentOrchestrator:
             request_delay_seconds=config.arxiv_request_delay_seconds,
         )
         self.ranking_skill = ranking_skill or TopicRankingSkill()
+        self.semantic_ranking_skill = semantic_ranking_skill or SemanticSeedRankingSkill(
+            store=self.store,
+            config=config,
+        )
         self.extraction_skill = extraction_skill or PaperExtractionSkill(provider=provider)
         self.briefing_skill = briefing_skill or DailyBriefingSkill(provider=provider)
         self.feedback_skill = feedback_skill or FeedbackRefinementSkill(store=self.store)
@@ -211,6 +217,45 @@ class DailyArxivAgentOrchestrator:
                 evidence_source=planning_result.evidence_source,
             )
 
+        semantic_readiness_result: SkillResult[dict[str, Any]] | None = None
+        use_semantic_ranking = use_seed_derived_plan
+        if use_semantic_ranking:
+            semantic_readiness_result = _semantic_readiness_result(
+                self.semantic_ranking_skill.check_readiness(active_seed)
+            )
+            _append_trace(
+                trace,
+                skill="semantic_readiness",
+                input_summary=(
+                    f"seed={active_seed is not None}; "
+                    f"seed_count={len(active_seed.seeds) if active_seed else 0}"
+                ),
+                result=semantic_readiness_result,
+                output_summary=(
+                    "semantic recommendation ready"
+                    if semantic_readiness_result.status == SkillStatus.SUCCESS
+                    else "semantic recommendation not ready"
+                ),
+                metadata=_trace_metadata(
+                    "semantic_readiness",
+                    semantic_readiness_result.metadata,
+                    include_debug=include_debug_trace,
+                ),
+            )
+            if semantic_readiness_result.status == SkillStatus.ERROR:
+                workflow = RecommendationWorkflow(
+                    run_id=workflow_run_id,
+                    topic=workflow_topic,
+                    query=query,
+                    trace=trace,
+                )
+                return _workflow_result(
+                    workflow,
+                    results=[planning_result, semantic_readiness_result],
+                    has_user_data=False,
+                    evidence_source=semantic_readiness_result.evidence_source,
+                )
+
         retrieval_result = _safe_skill_call(
             lambda: _retrieve_with_optional_query_plan(
                 self.retrieval_skill,
@@ -247,8 +292,13 @@ class DailyArxivAgentOrchestrator:
             if include_profile_feedback
             else []
         )
-        ranking_result = _safe_skill_call(
-            lambda: self.ranking_skill.rank(
+        ranking_error_code = (
+            "semantic_ranking_skill_failed"
+            if use_semantic_ranking
+            else "ranking_skill_failed"
+        )
+        if use_semantic_ranking:
+            rank_call = lambda: self.semantic_ranking_skill.rank(
                 papers,
                 topic=ranking_topic,
                 seed_preference=active_seed,
@@ -259,9 +309,25 @@ class DailyArxivAgentOrchestrator:
                 retrieval_source_metadata_by_paper_id=retrieval_result.metadata.get(
                     "source_metadata_by_paper_id"
                 ),
-            ),
+                profile_id=profile_id,
+            )
+        else:
+            rank_call = lambda: self.ranking_skill.rank(
+                papers,
+                topic=ranking_topic,
+                seed_preference=active_seed,
+                feedback_events=feedback_events,
+                top_k=top_k,
+                query_plan=query_plan,
+                retrieval_query=query,
+                retrieval_source_metadata_by_paper_id=retrieval_result.metadata.get(
+                    "source_metadata_by_paper_id"
+                ),
+            )
+        ranking_result = _safe_skill_call(
+            rank_call,
             data_default=[],
-            error_code="ranking_skill_failed",
+            error_code=ranking_error_code,
         )
         recommendations = ranking_result.data or []
         _append_trace(
@@ -279,6 +345,29 @@ class DailyArxivAgentOrchestrator:
                 include_debug=include_debug_trace,
             ),
         )
+        if use_semantic_ranking and ranking_result.status == SkillStatus.ERROR:
+            workflow = RecommendationWorkflow(
+                run_id=workflow_run_id,
+                topic=workflow_topic,
+                query=query,
+                papers=papers,
+                recommendations=[],
+                trace=trace,
+            )
+            results: list[SkillResult[Any]] = [
+                planning_result,
+                retrieval_result,
+                ranking_result,
+            ]
+            if semantic_readiness_result is not None:
+                results.insert(1, semantic_readiness_result)
+            return _workflow_result(
+                workflow,
+                results=results,
+                has_user_data=bool(papers),
+                evidence_source=ranking_result.evidence_source
+                or retrieval_result.evidence_source,
+            )
 
         extraction_result, item_results = self._extract_recommendations(
             recommendations,
@@ -349,6 +438,8 @@ class DailyArxivAgentOrchestrator:
             extraction_result,
             briefing_result,
         ]
+        if semantic_readiness_result is not None:
+            results.insert(1, semantic_readiness_result)
         return _workflow_result(
             workflow,
             results=results,
@@ -770,6 +861,50 @@ def _query_plan_output_summary(result: SkillResult[QueryPlan]) -> str:
     return summary
 
 
+def _semantic_readiness_result(readiness: Any) -> SkillResult[dict[str, Any]]:
+    metadata = readiness.model_dump(mode="json")
+    if readiness.can_run:
+        return SkillResult[dict[str, Any]](
+            status=SkillStatus.SUCCESS,
+            data=metadata,
+            evidence_source=EvidenceSource.METADATA,
+            message="Semantic seed recommendation readiness check passed.",
+            metadata=metadata,
+        )
+
+    error_code = readiness.error_code or "semantic_readiness_failed"
+    return SkillResult[dict[str, Any]](
+        status=SkillStatus.ERROR,
+        data=metadata,
+        evidence_source=EvidenceSource.METADATA,
+        error=SkillError(
+            code=error_code,
+            message=_semantic_readiness_error_message(error_code),
+            retryable=error_code != "semantic_seed_quality_error",
+        ),
+        metadata=metadata,
+    )
+
+
+def _semantic_readiness_error_message(error_code: str) -> str:
+    if error_code == "semantic_embedding_credentials_missing":
+        return (
+            "Semantic seed recommendation requires embedding provider credentials "
+            "before retrieval can run."
+        )
+    if error_code == "semantic_embedding_endpoint_unsafe":
+        return (
+            "Semantic seed recommendation requires a safe embedding provider endpoint "
+            "before retrieval can run."
+        )
+    if error_code == "semantic_seed_quality_error":
+        return (
+            "Semantic seed recommendation requires usable seed title, abstract, "
+            "or category text."
+        )
+    return "Semantic seed recommendation is not ready to run."
+
+
 def _trace_metadata(
     skill: str,
     metadata: dict[str, Any],
@@ -855,6 +990,24 @@ def _trace_metadata(
                 redacted["planner_fallback"] = bool(planner.get("fallback_reason"))
         return redacted
 
+    if skill == "semantic_readiness":
+        return _pick_metadata(
+            metadata,
+            (
+                "provider",
+                "provider_mode",
+                "provider_label",
+                "credential_status",
+                "model",
+                "endpoint_safety",
+                "cache_enabled",
+                "seed_quality",
+                "can_run",
+                "error_code",
+                "warnings",
+            ),
+        )
+
     if skill == "ranking":
         return _pick_metadata(
             metadata,
@@ -868,6 +1021,15 @@ def _trace_metadata(
                 "qualifying_count",
                 "fallback_count",
                 "minimum_evidence_score",
+                "minimum_semantic_similarity",
+                "semantic_similarity_threshold",
+                "candidate_count",
+                "seed_count",
+                "seed_excluded_count",
+                "semantic_provider",
+                "embedding_cache",
+                "semantic_context",
+                "semantic_error",
             ),
         )
 

@@ -54,6 +54,9 @@ STOPWORDS = {
     "with",
 }
 
+SEMANTIC_SEED_RANKING_MODE = "semantic_seed"
+SEMANTIC_TOPIC_SEED_RANKING_MODE = "semantic_topic_seed"
+
 
 class TopicRankingSkill:
     """Rank papers by explainable topic, retrieval, seed, and feedback signals."""

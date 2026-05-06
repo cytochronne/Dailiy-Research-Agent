@@ -336,7 +336,7 @@ Implementation sequencing follows the phased delivery above. The first executabl
 **Verification:**
 - Existing storage tests continue to pass, and embedding cache behavior is covered independently.
 
-- [ ] **Unit 4: Semantic Seed Ranking**
+- [x] **Unit 4: Semantic Seed Ranking**
 
 **Goal:** Rank retrieved candidates primarily by semantic similarity to the seed profile while preserving hybrid ranking signals and explainability.
 

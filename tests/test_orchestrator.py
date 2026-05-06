@@ -4,6 +4,7 @@ import json
 
 import daily_arxiv_agent.cli as cli_module
 from daily_arxiv_agent.cli import main
+from daily_arxiv_agent.config import AppConfig
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
     ExplanationMode,
@@ -20,6 +21,8 @@ from daily_arxiv_agent.contracts import (
     SkillResult,
     SkillStatus,
 )
+from daily_arxiv_agent.embeddings.base import EmbeddingProviderError
+from daily_arxiv_agent.embeddings.fake import FakeEmbeddingProvider
 from daily_arxiv_agent.llm.fake import FakeLLMProvider
 from daily_arxiv_agent.orchestrator import DailyArxivAgentOrchestrator
 from daily_arxiv_agent.skills.arxiv_retrieval import ArxivRetrievalSkill
@@ -31,6 +34,7 @@ from daily_arxiv_agent.skills.seed_parsing import (
     build_paper_preference_text,
 )
 from daily_arxiv_agent.skills.ranking import TopicRankingSkill
+from daily_arxiv_agent.skills.semantic_seed_ranking import SemanticSeedRankingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
 
 
@@ -142,6 +146,11 @@ class SpyRetrievalSkill:
     def retrieve(self, query, use_cache=True, query_plan=None):  # noqa: ANN001, ANN201
         self.calls += 1
         raise AssertionError("follow-up should use stored papers before fetching")
+
+
+class RaisingEmbeddingProvider:
+    def embed_texts(self, texts):  # noqa: ANN001, ANN201
+        raise EmbeddingProviderError("embedding provider unavailable")
 
 
 class RaisingPlannerProvider:
@@ -549,7 +558,9 @@ def test_recommendation_workflow_records_planner_fallback_and_continues(
 
 def test_topicless_stored_seed_preference_drives_seed_derived_retrieval(
     tmp_path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
     store = SQLitePaperStore(tmp_path / "papers.sqlite3")
     seed_paper = make_paper(
         "2604.20001",
@@ -598,7 +609,13 @@ def test_topicless_stored_seed_preference_drives_seed_derived_retrieval(
     assert planning_step.metadata["raw_terms_debug_only"] is True
     assert "required_terms" not in planning_step.metadata
 
-    retrieval_step = workflow.trace[1]
+    readiness_step = workflow.trace[1]
+    assert readiness_step.skill == "semantic_readiness"
+    assert readiness_step.status == SkillStatus.SUCCESS
+    assert readiness_step.metadata["provider_mode"] == "fake"
+    assert readiness_step.metadata["seed_quality"] == "usable"
+
+    retrieval_step = workflow.trace[2]
     assert retrieval_step.metadata["planner_source"] == "seed_derived"
     assert retrieval_step.metadata["retrieved_candidate_count"] == 3
     assert retrieval_step.metadata["candidate_count"] == 2
@@ -612,6 +629,9 @@ def test_topicless_stored_seed_preference_drives_seed_derived_retrieval(
     assert {
         item.paper.paper_id for item in workflow.recommendations
     } == set(candidate_ids)
+    ranking_step = workflow.trace[3]
+    assert ranking_step.metadata["ranking_mode"] == "semantic_seed"
+    assert ranking_step.metadata["semantic_provider"]["provider_mode"] == "fake"
 
     trace_metadata = json.dumps(
         [step.metadata for step in workflow.trace],
@@ -660,7 +680,9 @@ def test_explicit_topic_with_seed_keeps_topic_query_planning(tmp_path) -> None:
 
 def test_seed_paper_ids_are_excluded_and_insufficient_pool_is_labeled(
     tmp_path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
     seed = make_paper(
         "2604.91001",
         "Robotic Manipulation for Household Assistance",
@@ -693,7 +715,9 @@ def test_seed_paper_ids_are_excluded_and_insufficient_pool_is_labeled(
     assert workflow is not None
     assert workflow.papers == []
     assert workflow.recommendations == []
-    retrieval_step = workflow.trace[1]
+    retrieval_step = next(
+        step for step in workflow.trace if step.skill == "arxiv_retrieval"
+    )
     assert retrieval_step.metadata["retrieved_candidate_count"] == 1
     assert retrieval_step.metadata["candidate_count"] == 0
     assert retrieval_step.metadata["seed_excluded_count"] == 1
@@ -706,7 +730,9 @@ def test_seed_paper_ids_are_excluded_and_insufficient_pool_is_labeled(
 
 def test_seed_derived_retrieval_labels_missing_expected_relevant_candidates(
     tmp_path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
     seed = make_paper(
         "2604.92001",
         "Robotic Manipulation with Vision Language Agents",
@@ -754,7 +780,9 @@ def test_seed_derived_retrieval_labels_missing_expected_relevant_candidates(
     assert result.status == SkillStatus.SUCCESS
     workflow = result.data
     assert workflow is not None
-    retrieval_step = workflow.trace[1]
+    retrieval_step = next(
+        step for step in workflow.trace if step.skill == "arxiv_retrieval"
+    )
     assert retrieval_step.metadata["candidate_pool_sufficient"] is False
     assert retrieval_step.metadata["candidate_pool_diagnostic"] == (
         "candidate_pool_insufficient"
@@ -801,6 +829,118 @@ def test_seed_metadata_quality_error_skips_retrieval(tmp_path) -> None:
     assert planning_step.metadata["source"] == "seed_derived"
     assert planning_step.metadata["quality_error_reason"] == "seed_metadata_missing_text"
     assert planning_step.metadata["query_variant_count"] == 0
+
+
+def test_semantic_readiness_failure_short_circuits_before_retrieval(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("EMBEDDING_REUSE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    retrieval = SpyRetrievalSkill()
+    seed = make_paper(
+        "2604.93001",
+        "Vision Language Robot Planning",
+        "Embodied agents plan manipulation tasks from visual context.",
+        category="cs.RO",
+    )
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        retrieval_skill=retrieval,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic=None,
+            category="cs.RO",
+            search_mode=SearchMode.BROAD,
+            max_requests=4,
+        ),
+        seed_preference=make_seed_preference([seed]),
+        top_k=1,
+        use_cache=False,
+        run_id="run-semantic-readiness-error",
+    )
+
+    assert result.status == SkillStatus.ERROR
+    assert result.error is not None
+    assert result.error.code == "semantic_embedding_credentials_missing"
+    assert retrieval.calls == 0
+    workflow = result.data
+    assert workflow is not None
+    assert workflow.papers == []
+    assert workflow.recommendations == []
+    assert [step.skill for step in workflow.trace] == [
+        "query_planning",
+        "semantic_readiness",
+    ]
+    readiness_step = workflow.trace[1]
+    assert readiness_step.status == SkillStatus.ERROR
+    assert readiness_step.metadata["provider_mode"] == "live"
+    assert readiness_step.metadata["credential_status"] == "missing"
+
+
+def test_semantic_ranking_failure_short_circuits_extraction_and_briefing(
+    tmp_path,
+) -> None:
+    seed = make_paper(
+        "2604.94001",
+        "Vision Language Robot Planning",
+        "Embodied agents plan manipulation tasks from visual context.",
+        category="cs.RO",
+    )
+    candidate = make_paper(
+        "2604.94002",
+        "Embodied Task Planning",
+        "Robots infer manipulation steps from scene goals.",
+        category="cs.RO",
+    )
+    briefing = CapturingBriefingSkill()
+    semantic_ranking = SemanticSeedRankingSkill(
+        embedding_provider=RaisingEmbeddingProvider(),
+        store=SQLitePaperStore(tmp_path / "semantic.sqlite3"),
+        config=AppConfig(embedding_provider="fake"),
+    )
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        retrieval_skill=StaticRetrievalSkill([candidate]),
+        semantic_ranking_skill=semantic_ranking,
+        briefing_skill=briefing,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic=None,
+            category="cs.RO",
+            search_mode=SearchMode.BROAD,
+            max_requests=4,
+        ),
+        seed_preference=make_seed_preference([seed]),
+        top_k=1,
+        use_cache=False,
+        run_id="run-semantic-ranking-error",
+    )
+
+    assert result.status == SkillStatus.ERROR
+    assert result.error is not None
+    assert result.error.code == "semantic_embedding_provider_failed"
+    workflow = result.data
+    assert workflow is not None
+    assert workflow.recommendations == []
+    assert [step.skill for step in workflow.trace] == [
+        "query_planning",
+        "semantic_readiness",
+        "arxiv_retrieval",
+        "ranking",
+    ]
+    ranking_step = workflow.trace[3]
+    assert ranking_step.status == SkillStatus.ERROR
+    assert ranking_step.metadata["ranking_mode"] == "semantic_seed"
+    assert briefing.calls == []
 
 
 def test_category_date_only_recommendation_ranks_by_category_recency(

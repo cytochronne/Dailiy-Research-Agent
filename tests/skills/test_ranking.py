@@ -133,6 +133,9 @@ def test_seed_preference_ranks_similar_papers_without_explicit_topic() -> None:
     assert recommendations[0].score > recommendations[1].score
     assert "seed-paper similarity" in recommendations[0].rationale.lower()
     assert result.metadata["ranking_mode"] == "seed"
+    assert recommendations[0].score_breakdown is not None
+    assert recommendations[0].score_breakdown.semantic_seed == 0
+    assert recommendations[0].score_breakdown.semantic_similarities == []
 
 
 def test_hybrid_topic_and_seed_ranking_combines_both_rationales() -> None:

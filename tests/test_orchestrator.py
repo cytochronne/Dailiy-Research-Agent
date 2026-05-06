@@ -14,6 +14,8 @@ from daily_arxiv_agent.contracts import (
     Recommendation,
     RetrievalQuery,
     SearchMode,
+    SeedPreference,
+    SeedRecord,
     SkillError,
     SkillResult,
     SkillStatus,
@@ -24,11 +26,16 @@ from daily_arxiv_agent.skills.arxiv_retrieval import ArxivRetrievalSkill
 from daily_arxiv_agent.skills.briefing import DailyBriefingSkill
 from daily_arxiv_agent.skills.followup import FollowupQuery
 from daily_arxiv_agent.skills.query_planning import QueryPlanningSkill
+from daily_arxiv_agent.skills.seed_parsing import (
+    DeterministicTextVectorizer,
+    build_paper_preference_text,
+)
 from daily_arxiv_agent.skills.ranking import TopicRankingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "arxiv_atom_response.xml"
+SEARCH_FIXTURE = Path(__file__).parent / "fixtures" / "arxiv_search_quality_response.xml"
 TEXT_FIXTURE = Path(__file__).parent / "fixtures" / "sample_paper_text.txt"
 
 
@@ -70,8 +77,14 @@ class FallbackRetrievalSkill:
 
 
 class StaticRetrievalSkill:
-    def __init__(self, papers: list[PaperMetadata]) -> None:
+    def __init__(
+        self,
+        papers: list[PaperMetadata],
+        *,
+        expected_relevant_paper_ids: list[str] | None = None,
+    ) -> None:
         self.papers = papers
+        self.expected_relevant_paper_ids = expected_relevant_paper_ids or []
         self.calls = 0
         self.query_plans = []
 
@@ -117,6 +130,7 @@ class StaticRetrievalSkill:
                     "search_query": "RAW_EXPANDED_QUERY_SHOULD_BE_REDACTED"
                 },
                 "source_metadata_by_paper_id": source_metadata_by_paper_id,
+                "expected_relevant_paper_ids": self.expected_relevant_paper_ids,
             },
         )
 
@@ -231,6 +245,54 @@ def make_recommendation(paper: PaperMetadata, rank: int, score: float) -> Recomm
         score=score,
         rationale="Initial deterministic ranking.",
         evidence_source=EvidenceSource.ABSTRACT if paper.abstract else EvidenceSource.METADATA,
+    )
+
+
+def make_seed_preference(
+    papers: list[PaperMetadata],
+    *,
+    profile_id: str = "default",
+) -> SeedPreference:
+    records = [
+        SeedRecord(
+            identity=f"arxiv:{paper.paper_id}",
+            input_text=paper.paper_id,
+            input_type="arxiv_id",
+            paper_id=paper.paper_id,
+            title=paper.title,
+            abstract=paper.abstract,
+            paper=paper,
+            preference_text=build_paper_preference_text(paper),
+        )
+        for paper in papers
+    ]
+    preference_text = "\n\n".join(record.preference_text for record in records)
+    return SeedPreference(
+        profile_id=profile_id,
+        seeds=records,
+        preference_text=preference_text,
+        vector=DeterministicTextVectorizer().vectorize(preference_text),
+    )
+
+
+def make_fallback_seed_preference(
+    paper_id: str = "2604.99999",
+    *,
+    profile_id: str = "default",
+) -> SeedPreference:
+    record = SeedRecord(
+        identity=f"arxiv:{paper_id}",
+        input_text=paper_id,
+        input_type="arxiv_id",
+        paper_id=paper_id,
+        title=paper_id,
+        preference_text=paper_id,
+    )
+    return SeedPreference(
+        profile_id=profile_id,
+        seeds=[record],
+        preference_text=record.preference_text,
+        vector=DeterministicTextVectorizer().vectorize(record.preference_text),
     )
 
 
@@ -483,6 +545,262 @@ def test_recommendation_workflow_records_planner_fallback_and_continues(
     assert planning_step.metadata["source"] == "deterministic"
     assert planning_step.metadata["fallback"] is True
     assert len(workflow.recommendations) == 2
+
+
+def test_topicless_stored_seed_preference_drives_seed_derived_retrieval(
+    tmp_path,
+) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    seed_paper = make_paper(
+        "2604.20001",
+        "Multimodal LLM Agents for Robotic Manipulation",
+        (
+            "We present multimodal LLM agents for robotic manipulation with "
+            "vision-language planning and closed-loop control."
+        ),
+        category="cs.RO",
+    )
+    store.save_seed_preference(make_seed_preference([seed_paper], profile_id="demo"))
+    client = FakeClient(SEARCH_FIXTURE.read_text())
+    retrieval = ArxivRetrievalSkill(
+        store=store,
+        client=client,
+        request_delay_seconds=0,
+    )
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=store,
+        retrieval_skill=retrieval,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic=None,
+            category="cs.RO",
+            search_mode=SearchMode.BROAD,
+            candidate_pool_size=3,
+            page_size=3,
+            max_requests=4,
+        ),
+        profile_id="demo",
+        top_k=2,
+        use_cache=False,
+        run_id="run-seed-derived",
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    workflow = result.data
+    assert workflow is not None
+    planning_step = workflow.trace[0]
+    assert planning_step.metadata["source"] == "seed_derived"
+    assert planning_step.metadata["query_variant_count"] >= 1
+    assert planning_step.metadata["candidate_target"] == 3
+    assert planning_step.metadata["raw_terms_debug_only"] is True
+    assert "required_terms" not in planning_step.metadata
+
+    retrieval_step = workflow.trace[1]
+    assert retrieval_step.metadata["planner_source"] == "seed_derived"
+    assert retrieval_step.metadata["retrieved_candidate_count"] == 3
+    assert retrieval_step.metadata["candidate_count"] == 2
+    assert retrieval_step.metadata["seed_excluded_count"] == 1
+    assert retrieval_step.metadata["candidate_pool_sufficient"] is True
+    assert retrieval_step.metadata["candidate_pool_diagnostic"] == (
+        "candidate_pool_sufficient"
+    )
+    candidate_ids = [paper.paper_id for paper in workflow.papers]
+    assert candidate_ids == ["2604.20002", "2604.20003"]
+    assert {
+        item.paper.paper_id for item in workflow.recommendations
+    } == set(candidate_ids)
+
+    trace_metadata = json.dumps(
+        [step.metadata for step in workflow.trace],
+        sort_keys=True,
+        default=str,
+    )
+    assert "Multimodal LLM Agents" not in trace_metadata
+    assert "robotic" not in trace_metadata
+    assert "vision-language" not in trace_metadata
+    assert "search_query" not in trace_metadata
+
+
+def test_explicit_topic_with_seed_keeps_topic_query_planning(tmp_path) -> None:
+    seed = make_paper(
+        "2604.92001",
+        "Compiler Register Allocation",
+        "Graph coloring for register pressure in optimizing compilers.",
+        category="cs.PL",
+    )
+    retrieval = StaticRetrievalSkill(make_trend_papers())
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        retrieval_skill=retrieval,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic="robotic manipulation",
+            category="cs.RO",
+            search_mode=SearchMode.BROAD,
+        ),
+        seed_preference=make_seed_preference([seed]),
+        top_k=2,
+        use_cache=False,
+        run_id="run-topic-seed",
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    assert retrieval.query_plans
+    plan = retrieval.query_plans[0]
+    assert plan.planner.source == "deterministic"
+    assert plan.required_terms == ["robotic", "manipulation"]
+    assert "compiler" not in plan.required_terms
+
+
+def test_seed_paper_ids_are_excluded_and_insufficient_pool_is_labeled(
+    tmp_path,
+) -> None:
+    seed = make_paper(
+        "2604.91001",
+        "Robotic Manipulation for Household Assistance",
+        "Robotic manipulation systems coordinate perception and control.",
+        category="cs.RO",
+    )
+    retrieval = StaticRetrievalSkill([seed])
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        retrieval_skill=retrieval,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic=None,
+            category="cs.RO",
+            search_mode=SearchMode.BROAD,
+            candidate_pool_size=1,
+            max_requests=4,
+        ),
+        seed_preference=make_seed_preference([seed]),
+        top_k=1,
+        use_cache=False,
+        run_id="run-seed-excluded",
+    )
+
+    assert result.status == SkillStatus.EMPTY
+    workflow = result.data
+    assert workflow is not None
+    assert workflow.papers == []
+    assert workflow.recommendations == []
+    retrieval_step = workflow.trace[1]
+    assert retrieval_step.metadata["retrieved_candidate_count"] == 1
+    assert retrieval_step.metadata["candidate_count"] == 0
+    assert retrieval_step.metadata["seed_excluded_count"] == 1
+    assert retrieval_step.metadata["candidate_pool_sufficient"] is False
+    assert retrieval_step.metadata["candidate_pool_diagnostic"] == (
+        "candidate_pool_insufficient"
+    )
+    assert retrieval_step.metadata["candidate_pool_reason"] == "too_few_candidates"
+
+
+def test_seed_derived_retrieval_labels_missing_expected_relevant_candidates(
+    tmp_path,
+) -> None:
+    seed = make_paper(
+        "2604.92001",
+        "Robotic Manipulation with Vision Language Agents",
+        "Vision language agents plan dexterous robotic manipulation tasks.",
+        category="cs.RO",
+    )
+    candidates = [
+        make_paper(
+            "2604.92002",
+            "Robot Manipulation Planning",
+            "Planning policies coordinate manipulation skills.",
+            category="cs.RO",
+        ),
+        make_paper(
+            "2604.92003",
+            "Embodied Agent Control",
+            "Embodied control systems use feedback for robot actions.",
+            category="cs.RO",
+        ),
+    ]
+    retrieval = StaticRetrievalSkill(
+        candidates,
+        expected_relevant_paper_ids=["2604.92002", "2604.92999"],
+    )
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        retrieval_skill=retrieval,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic=None,
+            category="cs.RO",
+            search_mode=SearchMode.BROAD,
+            candidate_pool_size=2,
+            max_requests=4,
+        ),
+        seed_preference=make_seed_preference([seed]),
+        top_k=2,
+        use_cache=False,
+        run_id="run-seed-missing-relevant",
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    workflow = result.data
+    assert workflow is not None
+    retrieval_step = workflow.trace[1]
+    assert retrieval_step.metadata["candidate_pool_sufficient"] is False
+    assert retrieval_step.metadata["candidate_pool_diagnostic"] == (
+        "candidate_pool_insufficient"
+    )
+    assert retrieval_step.metadata["candidate_pool_reason"] == (
+        "expected_relevant_candidates_missing"
+    )
+    assert retrieval_step.metadata["missing_relevant_candidate_count"] == 1
+    assert "2604.92999" not in json.dumps(retrieval_step.metadata, sort_keys=True)
+
+
+def test_seed_metadata_quality_error_skips_retrieval(tmp_path) -> None:
+    retrieval = SpyRetrievalSkill()
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        retrieval_skill=retrieval,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic=None,
+            category="cs.RO",
+            search_mode=SearchMode.BROAD,
+            max_requests=4,
+        ),
+        seed_preference=make_fallback_seed_preference(),
+        top_k=1,
+        use_cache=False,
+        run_id="run-seed-quality-error",
+    )
+
+    assert result.status == SkillStatus.ERROR
+    assert result.error is not None
+    assert result.error.code == "semantic_seed_quality_error"
+    workflow = result.data
+    assert workflow is not None
+    assert workflow.papers == []
+    assert workflow.recommendations == []
+    assert retrieval.calls == 0
+    assert [step.skill for step in workflow.trace] == ["query_planning"]
+    planning_step = workflow.trace[0]
+    assert planning_step.status == SkillStatus.ERROR
+    assert planning_step.metadata["source"] == "seed_derived"
+    assert planning_step.metadata["quality_error_reason"] == "seed_metadata_missing_text"
+    assert planning_step.metadata["query_variant_count"] == 0
 
 
 def test_category_date_only_recommendation_ranks_by_category_recency(

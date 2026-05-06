@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date
 import math
 import re
@@ -16,6 +16,8 @@ from daily_arxiv_agent.contracts import (
     QueryPlanVariant,
     RetrievalQuery,
     SearchMode,
+    SeedPreference,
+    SeedRecord,
     SkillError,
     SkillResult,
     SkillStatus,
@@ -27,6 +29,7 @@ MAX_REQUIRED_TERMS = 8
 MAX_OPTIONAL_TERMS = 8
 MAX_PHRASES = 4
 MAX_VARIANTS = 4
+SEED_DERIVED_PLANNER_SOURCE = "seed_derived"
 
 STOPWORDS = {
     "a",
@@ -49,6 +52,7 @@ STOPWORDS = {
     "to",
     "using",
     "via",
+    "we",
     "with",
 }
 
@@ -131,6 +135,19 @@ class QueryPlanningSkill:
 
         return _success_result(llm_plan)
 
+    def plan_from_seed(
+        self,
+        query: RetrievalQuery,
+        seed_preference: SeedPreference,
+    ) -> SkillResult[QueryPlan]:
+        """Return a bounded query plan derived from seed-paper metadata."""
+
+        return build_seed_derived_query_plan(
+            query,
+            seed_preference,
+            max_variants=self.max_variants,
+        )
+
 
 def build_deterministic_query_plan(
     query: RetrievalQuery,
@@ -163,6 +180,55 @@ def build_deterministic_query_plan(
         phrases=phrases,
         rationale="Deterministic plan from normalized topic terms and filters.",
     )
+
+
+def build_seed_derived_query_plan(
+    query: RetrievalQuery,
+    seed_preference: SeedPreference,
+    *,
+    max_variants: int = MAX_VARIANTS,
+) -> SkillResult[QueryPlan]:
+    """Build a trace-safe query plan from usable seed title/abstract metadata."""
+
+    max_variants = _variant_limit(query, max_variants)
+    if not _has_usable_seed_text(seed_preference):
+        return _seed_quality_error_result(query, seed_preference)
+
+    title_terms = _seed_title_terms(seed_preference)
+    abstract_terms = _seed_abstract_terms(seed_preference)
+    required_terms = title_terms[:MAX_REQUIRED_TERMS]
+    if not required_terms:
+        required_terms = abstract_terms[:MAX_REQUIRED_TERMS]
+    required_term_set = set(required_terms)
+    optional_terms = [
+        term
+        for term in abstract_terms
+        if term not in required_term_set
+    ][:MAX_OPTIONAL_TERMS]
+    phrases = _seed_phrases(seed_preference, required_terms)
+    suggested_categories = _seed_categories(seed_preference, query)
+
+    variants = _build_seed_variants(
+        query,
+        required_terms=required_terms,
+        optional_terms=optional_terms,
+        phrases=phrases,
+        suggested_categories=suggested_categories,
+        max_variants=max_variants,
+    )
+    plan = QueryPlan(
+        search_mode=query.search_mode,
+        planner=QueryPlannerProvenance(
+            requested_mode=query.query_planner_mode,
+            source=SEED_DERIVED_PLANNER_SOURCE,
+        ),
+        variants=variants,
+        required_terms=required_terms,
+        optional_terms=optional_terms,
+        phrases=phrases,
+        rationale="Seed-derived plan from normalized seed title, abstract, and category metadata.",
+    )
+    return _seed_success_result(plan, query, seed_preference)
 
 
 def _variant_limit(query: RetrievalQuery, configured_limit: int) -> int:
@@ -277,6 +343,62 @@ def _build_variants(
             )
         )
     return deduped
+
+
+def _build_seed_variants(
+    query: RetrievalQuery,
+    *,
+    required_terms: Sequence[str],
+    optional_terms: Sequence[str],
+    phrases: Sequence[str],
+    suggested_categories: Sequence[str],
+    max_variants: int,
+) -> list[QueryPlanVariant]:
+    expanded_limit = max(
+        max_variants,
+        MAX_VARIANTS + len(suggested_categories) + 2,
+    )
+    variants = _build_variants(
+        query,
+        required_terms=required_terms,
+        optional_terms=optional_terms,
+        phrases=phrases,
+        suggested_categories=suggested_categories,
+        max_variants=expanded_limit,
+    )
+    if not variants:
+        variants = [
+            QueryPlanVariant(
+                label="seed_filters",
+                search_query=_with_filters("", query),
+                sort_by="submittedDate",
+            )
+        ]
+    if query.search_mode == SearchMode.STRICT:
+        return variants[:max_variants]
+    return _prioritize_seed_variants(variants, max_variants=max_variants)
+
+
+def _prioritize_seed_variants(
+    variants: Sequence[QueryPlanVariant],
+    *,
+    max_variants: int,
+) -> list[QueryPlanVariant]:
+    if len(variants) <= max_variants:
+        return list(variants)
+
+    category_variants = [
+        variant for variant in variants if variant.label.startswith("broad_category_")
+    ]
+    non_category_variants = [
+        variant for variant in variants if not variant.label.startswith("broad_category_")
+    ]
+    if not category_variants or max_variants <= 1:
+        return non_category_variants[:max_variants]
+
+    selected = non_category_variants[: max_variants - 1]
+    selected.append(category_variants[0])
+    return selected
 
 
 def _strict_variants(
@@ -483,6 +605,110 @@ def _topic_phrases(topic: str | None, terms: Sequence[str]) -> list[str]:
     return phrases[:MAX_PHRASES]
 
 
+def _has_usable_seed_text(seed_preference: SeedPreference) -> bool:
+    return any(
+        (_is_usable_seed_title(seed) and bool(_topic_terms(seed.title)))
+        or bool(_topic_terms(_seed_abstract(seed)))
+        for seed in seed_preference.seeds
+    )
+
+
+def _seed_title_terms(seed_preference: SeedPreference) -> list[str]:
+    return _dedupe_terms(
+        term
+        for seed in seed_preference.seeds
+        if _is_usable_seed_title(seed)
+        for term in _topic_terms(seed.title)
+    )
+
+
+def _seed_abstract_terms(seed_preference: SeedPreference) -> list[str]:
+    return _dedupe_terms(
+        term
+        for seed in seed_preference.seeds
+        for term in _topic_terms(_seed_abstract(seed))
+    )
+
+
+def _seed_phrases(
+    seed_preference: SeedPreference,
+    required_terms: Sequence[str],
+) -> list[str]:
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for seed in seed_preference.seeds:
+        if not _is_usable_seed_title(seed):
+            continue
+        for phrase in _topic_phrases(seed.title, _topic_terms(seed.title)):
+            if phrase in seen:
+                continue
+            phrases.append(phrase)
+            seen.add(phrase)
+            if len(phrases) >= MAX_PHRASES:
+                return phrases
+
+    for index in range(len(required_terms) - 1):
+        phrase = f"{required_terms[index]} {required_terms[index + 1]}"
+        if phrase in seen:
+            continue
+        phrases.append(phrase)
+        seen.add(phrase)
+        if len(phrases) >= MAX_PHRASES:
+            break
+    return phrases
+
+
+def _seed_categories(
+    seed_preference: SeedPreference,
+    query: RetrievalQuery,
+) -> list[str]:
+    if query.category:
+        return []
+    categories: list[str] = []
+    seen: set[str] = set()
+    for seed in seed_preference.seeds:
+        paper = seed.paper
+        if paper is None:
+            continue
+        for category in paper.categories:
+            if not CATEGORY_PATTERN.fullmatch(category) or category in seen:
+                continue
+            categories.append(category)
+            seen.add(category)
+            if len(categories) >= 6:
+                return categories
+    return categories
+
+
+def _seed_abstract(seed: SeedRecord) -> str | None:
+    if seed.abstract:
+        return seed.abstract
+    if seed.paper is not None:
+        return seed.paper.abstract
+    return None
+
+
+def _is_usable_seed_title(seed: SeedRecord) -> bool:
+    title = _clean_phrase(seed.title)
+    if len(title.split()) < 2:
+        return False
+    paper_id = seed.paper_id or (seed.paper.paper_id if seed.paper else None)
+    return not paper_id or title != _clean_phrase(paper_id)
+
+
+def _dedupe_terms(values: Iterable[str]) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value or value in seen:
+            continue
+        terms.append(value)
+        seen.add(value)
+        if len(terms) >= max(MAX_REQUIRED_TERMS, MAX_OPTIONAL_TERMS):
+            break
+    return terms
+
+
 def _normalize_provider_terms(
     value: Any,
     *,
@@ -606,6 +832,110 @@ def _fallback_result(
         message="Using deterministic query planning fallback.",
         metadata=_metadata(plan, fallback=True),
     )
+
+
+def _seed_success_result(
+    plan: QueryPlan,
+    query: RetrievalQuery,
+    seed_preference: SeedPreference,
+) -> SkillResult[QueryPlan]:
+    return SkillResult[QueryPlan](
+        status=SkillStatus.SUCCESS,
+        data=plan,
+        evidence_source=EvidenceSource.METADATA,
+        metadata=_seed_metadata(
+            plan,
+            query,
+            seed_preference,
+            fallback=False,
+        ),
+    )
+
+
+def _seed_quality_error_result(
+    query: RetrievalQuery,
+    seed_preference: SeedPreference,
+) -> SkillResult[QueryPlan]:
+    return SkillResult[QueryPlan](
+        status=SkillStatus.ERROR,
+        data=None,
+        evidence_source=EvidenceSource.METADATA,
+        error=SkillError(
+            code="semantic_seed_quality_error",
+            message="Seed-derived retrieval requires at least one usable seed title or abstract.",
+            retryable=False,
+        ),
+        message="Seed metadata is insufficient for seed-derived retrieval.",
+        metadata={
+            "requested_mode": query.query_planner_mode.value,
+            "source": SEED_DERIVED_PLANNER_SOURCE,
+            "fallback": False,
+            "fallback_reason": None,
+            "query_variant_count": 0,
+            "candidate_target": query.effective_candidate_pool_size,
+            "raw_terms_debug_only": True,
+            "seed_count": len(seed_preference.seeds),
+            "seed_paper_count": _seed_paper_count(seed_preference),
+            "quality_error_reason": "seed_metadata_missing_text",
+            "safe_to_persist": [
+                "requested_mode",
+                "source",
+                "query_variant_count",
+                "candidate_target",
+                "raw_terms_debug_only",
+                "seed_count",
+                "seed_paper_count",
+                "quality_error_reason",
+            ],
+            "debug_only": [
+                "required_terms",
+                "optional_terms",
+                "phrases",
+                "query_variants",
+                "planner_rationale",
+            ],
+        },
+    )
+
+
+def _seed_metadata(
+    plan: QueryPlan,
+    query: RetrievalQuery,
+    seed_preference: SeedPreference,
+    *,
+    fallback: bool,
+) -> dict[str, Any]:
+    metadata = _metadata(plan, fallback=fallback)
+    metadata.update(
+        {
+            "candidate_target": query.effective_candidate_pool_size,
+            "raw_terms_debug_only": True,
+            "seed_count": len(seed_preference.seeds),
+            "seed_paper_count": _seed_paper_count(seed_preference),
+            "safe_to_persist": [
+                "requested_mode",
+                "source",
+                "query_variant_count",
+                "candidate_target",
+                "raw_terms_debug_only",
+                "seed_count",
+                "seed_paper_count",
+            ],
+            "debug_only": [
+                "required_terms",
+                "optional_terms",
+                "phrases",
+                "exclusions",
+                "query_variants",
+                "planner_rationale",
+            ],
+        }
+    )
+    return metadata
+
+
+def _seed_paper_count(seed_preference: SeedPreference) -> int:
+    return sum(1 for seed in seed_preference.seeds if seed.paper_id or seed.paper)
 
 
 def _metadata(plan: QueryPlan, *, fallback: bool) -> dict[str, Any]:

@@ -35,8 +35,10 @@ from daily_arxiv_agent.skills.extraction import PaperExtractionSkill
 from daily_arxiv_agent.skills.feedback import FeedbackInput, FeedbackRefinementSkill
 from daily_arxiv_agent.skills.followup import FollowupQuery, FollowupSkill
 from daily_arxiv_agent.skills.query_planning import (
+    SEED_DERIVED_PLANNER_SOURCE,
     QueryPlanningSkill,
     build_deterministic_query_plan,
+    build_seed_derived_query_plan,
 )
 from daily_arxiv_agent.skills.ranking import TopicRankingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
@@ -160,16 +162,28 @@ class DailyArxivAgentOrchestrator:
         ranking_topic = topic or query.topic
         workflow_topic = ranking_topic or "personalized research"
         trace: list[WorkflowTraceStep] = []
-
-        planning_result = _query_plan_or_fallback(
+        active_seed = seed_preference or self.store.load_seed_preference(profile_id)
+        use_seed_derived_plan = _should_use_seed_derived_query_plan(
             query,
-            _safe_skill_call(
-                lambda: self.query_planning_skill.plan(query),
-                data_default=None,
-                error_code="query_planning_skill_failed",
-            ),
+            ranking_topic,
+            active_seed,
         )
-        query_plan = planning_result.data
+
+        raw_planning_result = _safe_skill_call(
+            lambda: _plan_query(
+                self.query_planning_skill,
+                query,
+                seed_preference=active_seed,
+                use_seed_derived_plan=use_seed_derived_plan,
+            ),
+            data_default=None,
+            error_code="query_planning_skill_failed",
+        )
+        planning_result = (
+            raw_planning_result
+            if use_seed_derived_plan
+            else _query_plan_or_fallback(query, raw_planning_result)
+        )
         _append_trace(
             trace,
             skill="query_planning",
@@ -182,6 +196,20 @@ class DailyArxivAgentOrchestrator:
                 include_debug=include_debug_trace,
             ),
         )
+        query_plan = planning_result.data
+        if query_plan is None:
+            workflow = RecommendationWorkflow(
+                run_id=workflow_run_id,
+                topic=workflow_topic,
+                query=query,
+                trace=trace,
+            )
+            return _workflow_result(
+                workflow,
+                results=[planning_result],
+                has_user_data=False,
+                evidence_source=planning_result.evidence_source,
+            )
 
         retrieval_result = _safe_skill_call(
             lambda: _retrieve_with_optional_query_plan(
@@ -192,6 +220,13 @@ class DailyArxivAgentOrchestrator:
             ),
             data_default=[],
             error_code="retrieval_skill_failed",
+        )
+        retrieval_result = _prepare_seed_candidates(
+            retrieval_result,
+            query=query,
+            seed_preference=active_seed,
+            top_k=top_k,
+            seed_derived=use_seed_derived_plan,
         )
         papers = retrieval_result.data or []
         _append_trace(
@@ -207,7 +242,6 @@ class DailyArxivAgentOrchestrator:
             ),
         )
 
-        active_seed = seed_preference or self.store.load_seed_preference(profile_id)
         feedback_events = (
             self.store.list_feedback_events(profile_id=profile_id)
             if include_profile_feedback
@@ -673,6 +707,55 @@ def _query_plan_or_fallback(
     )
 
 
+def _plan_query(
+    query_planning_skill: Any,
+    query: RetrievalQuery,
+    *,
+    seed_preference: SeedPreference | None,
+    use_seed_derived_plan: bool,
+) -> SkillResult[QueryPlan]:
+    if not use_seed_derived_plan:
+        return query_planning_skill.plan(query)
+
+    if seed_preference is None:
+        return SkillResult[QueryPlan](
+            status=SkillStatus.ERROR,
+            data=None,
+            evidence_source=EvidenceSource.METADATA,
+            error=SkillError(
+                code="semantic_seed_quality_error",
+                message="Seed-derived retrieval requires a seed preference.",
+                retryable=False,
+            ),
+            metadata={
+                "requested_mode": query.query_planner_mode.value,
+                "source": SEED_DERIVED_PLANNER_SOURCE,
+                "fallback": False,
+                "query_variant_count": 0,
+                "candidate_target": query.effective_candidate_pool_size,
+                "raw_terms_debug_only": True,
+                "quality_error_reason": "seed_preference_missing",
+            },
+        )
+
+    plan_from_seed = getattr(query_planning_skill, "plan_from_seed", None)
+    if callable(plan_from_seed):
+        return plan_from_seed(query, seed_preference)
+    return build_seed_derived_query_plan(query, seed_preference)
+
+
+def _should_use_seed_derived_query_plan(
+    query: RetrievalQuery,
+    ranking_topic: str | None,
+    seed_preference: SeedPreference | None,
+) -> bool:
+    return seed_preference is not None and not _has_text(ranking_topic or query.topic)
+
+
+def _has_text(value: str | None) -> bool:
+    return bool(value and value.strip())
+
+
 def _query_plan_output_summary(result: SkillResult[QueryPlan]) -> str:
     plan = result.data
     variant_count = plan.variant_count if plan is not None else 0
@@ -680,8 +763,10 @@ def _query_plan_output_summary(result: SkillResult[QueryPlan]) -> str:
     if source is None and plan is not None:
         source = plan.planner.source
     summary = f"{variant_count} query variant(s) planned via {source or 'unknown'}"
-    if result.status in {SkillStatus.FALLBACK, SkillStatus.ERROR}:
+    if result.status == SkillStatus.FALLBACK:
         return f"{summary}; fallback visible"
+    if result.status == SkillStatus.ERROR:
+        return f"{summary}; error visible"
     return summary
 
 
@@ -695,6 +780,24 @@ def _trace_metadata(
         return metadata
 
     if skill == "query_planning":
+        if metadata.get("source") == SEED_DERIVED_PLANNER_SOURCE:
+            return _pick_metadata(
+                metadata,
+                (
+                    "requested_mode",
+                    "source",
+                    "fallback",
+                    "fallback_reason",
+                    "query_variant_count",
+                    "candidate_target",
+                    "raw_terms_debug_only",
+                    "seed_count",
+                    "seed_paper_count",
+                    "quality_error_reason",
+                    "safe_to_persist",
+                    "debug_only",
+                ),
+            )
         return _pick_metadata(
             metadata,
             (
@@ -723,6 +826,14 @@ def _trace_metadata(
                 "candidate_target",
                 "cache_status",
                 "budget_exhausted",
+                "seed_derived_retrieval",
+                "retrieved_candidate_count",
+                "seed_excluded_count",
+                "candidate_pool_sufficient",
+                "candidate_pool_diagnostic",
+                "candidate_pool_reason",
+                "candidate_pool_minimum",
+                "missing_relevant_candidate_count",
             ),
         )
         partial_failures = metadata.get("partial_failures")
@@ -966,6 +1077,135 @@ def _retrieve_with_optional_query_plan(
     if _call_accepts_keyword(retrieve, "query_plan"):
         return retrieve(query, use_cache=use_cache, query_plan=query_plan)
     return retrieve(query, use_cache=use_cache)
+
+
+def _prepare_seed_candidates(
+    result: SkillResult[list[PaperMetadata]],
+    *,
+    query: RetrievalQuery,
+    seed_preference: SeedPreference | None,
+    top_k: int,
+    seed_derived: bool,
+) -> SkillResult[list[PaperMetadata]]:
+    if seed_preference is None and not seed_derived:
+        return result
+
+    raw_papers = result.data or []
+    seed_ids = _seed_paper_ids(seed_preference)
+    papers = [paper for paper in raw_papers if paper.paper_id not in seed_ids]
+    metadata = dict(result.metadata)
+
+    seed_excluded_count = len(raw_papers) - len(papers)
+    if seed_preference is not None:
+        metadata.update(
+            {
+                "seed_paper_ids_excluded": sorted(seed_ids),
+                "seed_excluded_count": seed_excluded_count,
+                "retrieved_candidate_count": len(raw_papers),
+                "candidate_count": len(papers),
+            }
+        )
+
+    if seed_derived:
+        metadata.update(
+            _candidate_pool_quality_metadata(
+                papers,
+                query=query,
+                top_k=top_k,
+                seed_ids=seed_ids,
+                retrieval_metadata=result.metadata,
+            )
+        )
+
+    status = result.status
+    message = result.message
+    if status == SkillStatus.SUCCESS and raw_papers and not papers:
+        status = SkillStatus.EMPTY
+        message = "Only seed papers were retrieved; no non-seed candidates remain."
+
+    return SkillResult[list[PaperMetadata]](
+        status=status,
+        data=papers,
+        evidence_source=result.evidence_source,
+        provenance=[paper.provenance for paper in papers],
+        error=result.error,
+        message=message,
+        metadata=metadata,
+    )
+
+
+def _candidate_pool_quality_metadata(
+    papers: Sequence[PaperMetadata],
+    *,
+    query: RetrievalQuery,
+    top_k: int,
+    seed_ids: set[str],
+    retrieval_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    candidate_ids = {paper.paper_id for paper in papers}
+    expected_relevant_ids = [
+        paper_id
+        for paper_id in _expected_relevant_paper_ids(retrieval_metadata)
+        if paper_id not in seed_ids
+    ]
+    missing_relevant_ids = [
+        paper_id for paper_id in expected_relevant_ids if paper_id not in candidate_ids
+    ]
+    minimum_count = min(max(top_k, 0), query.effective_candidate_pool_size)
+    too_few_candidates = len(papers) < minimum_count
+    sufficient = not too_few_candidates and not missing_relevant_ids
+    reason = None
+    if too_few_candidates:
+        reason = "too_few_candidates"
+    elif missing_relevant_ids:
+        reason = "expected_relevant_candidates_missing"
+
+    return {
+        "seed_derived_retrieval": True,
+        "candidate_pool_sufficient": sufficient,
+        "candidate_pool_diagnostic": (
+            "candidate_pool_sufficient"
+            if sufficient
+            else "candidate_pool_insufficient"
+        ),
+        "candidate_pool_reason": reason,
+        "candidate_pool_minimum": minimum_count,
+        "missing_relevant_candidate_count": len(missing_relevant_ids),
+        "missing_relevant_candidate_ids": missing_relevant_ids,
+    }
+
+
+def _expected_relevant_paper_ids(metadata: Mapping[str, Any]) -> list[str]:
+    raw_ids = (
+        metadata.get("expected_relevant_paper_ids")
+        or metadata.get("expected_relevant_ids")
+        or []
+    )
+    if not isinstance(raw_ids, Sequence) or isinstance(raw_ids, str):
+        return []
+    ids: list[str] = []
+    seen: set[str] = set()
+    for raw_id in raw_ids:
+        if not isinstance(raw_id, str):
+            continue
+        paper_id = raw_id.strip()
+        if not paper_id or paper_id in seen:
+            continue
+        ids.append(paper_id)
+        seen.add(paper_id)
+    return ids
+
+
+def _seed_paper_ids(seed_preference: SeedPreference | None) -> set[str]:
+    if seed_preference is None:
+        return set()
+    ids: set[str] = set()
+    for seed in seed_preference.seeds:
+        if seed.paper_id:
+            ids.add(seed.paper_id)
+        if seed.paper is not None:
+            ids.add(seed.paper.paper_id)
+    return ids
 
 
 def _call_accepts_keyword(call: Callable[..., Any], keyword: str) -> bool:

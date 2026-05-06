@@ -302,7 +302,7 @@ class DailyArxivAgentOrchestrator:
                 papers,
                 topic=ranking_topic,
                 seed_preference=active_seed,
-                feedback_events=feedback_events,
+                feedback_events=(),
                 top_k=top_k,
                 query_plan=query_plan,
                 retrieval_query=query,
@@ -330,6 +330,11 @@ class DailyArxivAgentOrchestrator:
             error_code=ranking_error_code,
         )
         recommendations = ranking_result.data or []
+        if use_semantic_ranking:
+            recommendations = _attach_semantic_context(
+                recommendations,
+                ranking_result.metadata,
+            )
         _append_trace(
             trace,
             skill="ranking",
@@ -367,6 +372,40 @@ class DailyArxivAgentOrchestrator:
                 has_user_data=bool(papers),
                 evidence_source=ranking_result.evidence_source
                 or retrieval_result.evidence_source,
+            )
+
+        semantic_feedback_result: SkillResult[list[Recommendation]] | None = None
+        if use_semantic_ranking and feedback_events and recommendations:
+            semantic_feedback_result = _safe_skill_call(
+                lambda: _refine_feedback_with_optional_context(
+                    self.feedback_skill,
+                    recommendations,
+                    feedback=feedback_events,
+                    papers=papers,
+                    profile_id=profile_id,
+                    recommendation_run_id=None,
+                    semantic_context=ranking_result.metadata,
+                    top_k=top_k,
+                ),
+                data_default=recommendations,
+                error_code="semantic_feedback_refinement_failed",
+            )
+            if semantic_feedback_result.data is not None:
+                recommendations = semantic_feedback_result.data
+            _append_trace(
+                trace,
+                skill="feedback_refinement",
+                input_summary=(
+                    f"recommendations={len(ranking_result.data or [])}; "
+                    f"feedback_events={len(feedback_events)}; profile_id={profile_id!r}"
+                ),
+                result=semantic_feedback_result,
+                output_summary=f"{len(recommendations)} refined recommendation(s)",
+                metadata=_trace_metadata(
+                    "feedback_refinement",
+                    semantic_feedback_result.metadata,
+                    include_debug=include_debug_trace,
+                ),
             )
 
         extraction_result, item_results = self._extract_recommendations(
@@ -440,6 +479,9 @@ class DailyArxivAgentOrchestrator:
         ]
         if semantic_readiness_result is not None:
             results.insert(1, semantic_readiness_result)
+        if semantic_feedback_result is not None:
+            feedback_result_index = 4 if semantic_readiness_result is not None else 3
+            results.insert(feedback_result_index, semantic_feedback_result)
         return _workflow_result(
             workflow,
             results=results,
@@ -462,20 +504,24 @@ class DailyArxivAgentOrchestrator:
         papers: Sequence[PaperMetadata] = (),
         profile_id: str = "default",
         recommendation_run_id: str | None = None,
+        semantic_context: Mapping[str, Any] | None = None,
         top_k: int | None = None,
         run_id: str | None = None,
+        include_debug_trace: bool = False,
     ) -> SkillResult[FeedbackWorkflow]:
         """Record feedback and return updated recommendations with trace output."""
 
         workflow_run_id = run_id or recommendation_run_id or uuid4().hex
         trace: list[WorkflowTraceStep] = []
         feedback_result = _safe_skill_call(
-            lambda: self.feedback_skill.refine(
+            lambda: _refine_feedback_with_optional_context(
+                self.feedback_skill,
                 recommendations,
                 feedback=feedback,
                 papers=papers,
                 profile_id=profile_id,
                 recommendation_run_id=recommendation_run_id or workflow_run_id,
+                semantic_context=semantic_context,
                 top_k=top_k,
             ),
             data_default=[],
@@ -491,6 +537,11 @@ class DailyArxivAgentOrchestrator:
             ),
             result=feedback_result,
             output_summary=f"{len(refined)} refined recommendation(s)",
+            metadata=_trace_metadata(
+                "feedback_refinement",
+                feedback_result.metadata,
+                include_debug=include_debug_trace,
+            ),
         )
         workflow = FeedbackWorkflow(
             run_id=workflow_run_id,
@@ -1033,6 +1084,25 @@ def _trace_metadata(
             ),
         )
 
+    if skill == "feedback_refinement":
+        return _pick_metadata(
+            metadata,
+            (
+                "profile_id",
+                "recommendation_run_id",
+                "feedback_count",
+                "active_feedback_count",
+                "feedback_rule",
+                "refinement_mode",
+                "refinement_status",
+                "influence_count",
+                "skipped_feedback_count",
+                "semantic_provider",
+                "embedding_cache",
+                "feedback_error",
+            ),
+        )
+
     if skill == "briefing":
         return _pick_metadata(
             metadata,
@@ -1068,6 +1138,38 @@ def _trace_metadata(
     return metadata
 
 
+def _attach_semantic_context(
+    recommendations: Sequence[Recommendation],
+    ranking_metadata: Mapping[str, Any],
+) -> list[Recommendation]:
+    semantic_context = _semantic_recommendation_context(ranking_metadata)
+    if not semantic_context:
+        return list(recommendations)
+    return [
+        recommendation.model_copy(update={"semantic_context": semantic_context})
+        for recommendation in recommendations
+    ]
+
+
+def _semantic_recommendation_context(
+    ranking_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    context = ranking_metadata.get("semantic_context")
+    provider = ranking_metadata.get("semantic_provider")
+    cache = ranking_metadata.get("embedding_cache")
+    if not any(isinstance(item, Mapping) for item in (context, provider, cache)):
+        return {}
+
+    payload: dict[str, Any] = {}
+    if isinstance(context, Mapping):
+        payload["semantic_context"] = dict(context)
+    if isinstance(provider, Mapping):
+        payload["semantic_provider"] = dict(provider)
+    if isinstance(cache, Mapping):
+        payload["embedding_cache"] = dict(cache)
+    return payload
+
+
 def _source_metadata_by_paper_id(
     metadata: Mapping[str, Any],
 ) -> Mapping[str, object] | None:
@@ -1075,6 +1177,30 @@ def _source_metadata_by_paper_id(
     if isinstance(source_metadata, Mapping):
         return source_metadata
     return None
+
+
+def _refine_feedback_with_optional_context(
+    feedback_skill: Any,
+    recommendations: Sequence[Recommendation],
+    *,
+    feedback: Sequence[FeedbackInput | FeedbackEvent | dict[str, object]],
+    papers: Sequence[PaperMetadata],
+    profile_id: str,
+    recommendation_run_id: str | None,
+    semantic_context: Mapping[str, Any] | None,
+    top_k: int | None,
+) -> SkillResult[list[Recommendation]]:
+    refine = feedback_skill.refine
+    kwargs: dict[str, Any] = {
+        "feedback": feedback,
+        "papers": papers,
+        "profile_id": profile_id,
+        "recommendation_run_id": recommendation_run_id,
+        "top_k": top_k,
+    }
+    if semantic_context is not None and _call_accepts_keyword(refine, "semantic_context"):
+        kwargs["semantic_context"] = semantic_context
+    return refine(recommendations, **kwargs)
 
 
 def _generate_briefing_with_optional_context(

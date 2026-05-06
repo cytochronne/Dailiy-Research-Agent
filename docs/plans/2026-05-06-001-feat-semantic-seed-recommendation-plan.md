@@ -392,7 +392,7 @@ sort_key = semantic_bucket, semantic_seed_score, secondary_score, recency, title
 **Verification:**
 - Semantic seed mode produces inspectable Top-K recommendations and does not regress deterministic ranking behavior.
 
-- [ ] **Unit 5: Semantic Feedback Refinement**
+- [x] **Unit 5: Semantic Feedback Refinement**
 
 **Goal:** Apply like/dislike feedback using semantic similarity in semantic recommendation contexts and preserve structured movement data for visualization.
 

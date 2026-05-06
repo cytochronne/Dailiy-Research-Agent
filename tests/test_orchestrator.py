@@ -8,6 +8,9 @@ from daily_arxiv_agent.config import AppConfig
 from daily_arxiv_agent.contracts import (
     EvidenceSource,
     ExplanationMode,
+    FeedbackEvent,
+    FeedbackRefinementStatus,
+    FeedbackValue,
     PaperMetadata,
     Provenance,
     RetrievalSourceMetadata,
@@ -27,6 +30,7 @@ from daily_arxiv_agent.llm.fake import FakeLLMProvider
 from daily_arxiv_agent.orchestrator import DailyArxivAgentOrchestrator
 from daily_arxiv_agent.skills.arxiv_retrieval import ArxivRetrievalSkill
 from daily_arxiv_agent.skills.briefing import DailyBriefingSkill
+from daily_arxiv_agent.skills.feedback import FeedbackRefinementSkill
 from daily_arxiv_agent.skills.followup import FollowupQuery
 from daily_arxiv_agent.skills.query_planning import QueryPlanningSkill
 from daily_arxiv_agent.skills.seed_parsing import (
@@ -181,6 +185,41 @@ class LegacyBriefingSkill:
         return self.delegate.generate(topic=topic, recommendations=recommendations)
 
 
+class LegacyFeedbackSkill:
+    def __init__(self) -> None:
+        self.delegate = FeedbackRefinementSkill()
+        self.calls = []
+
+    def refine(  # noqa: ANN201
+        self,
+        recommendations,
+        *,
+        feedback,
+        papers=(),
+        profile_id="default",
+        recommendation_run_id=None,
+        top_k=None,
+    ):
+        self.calls.append(
+            {
+                "recommendations": recommendations,
+                "feedback": feedback,
+                "papers": papers,
+                "profile_id": profile_id,
+                "recommendation_run_id": recommendation_run_id,
+                "top_k": top_k,
+            }
+        )
+        return self.delegate.refine(
+            recommendations,
+            feedback=feedback,
+            papers=papers,
+            profile_id=profile_id,
+            recommendation_run_id=recommendation_run_id,
+            top_k=top_k,
+        )
+
+
 class SpyRankingSkill:
     def __init__(self) -> None:
         self.delegate = TopicRankingSkill()
@@ -254,6 +293,18 @@ def make_recommendation(paper: PaperMetadata, rank: int, score: float) -> Recomm
         score=score,
         rationale="Initial deterministic ranking.",
         evidence_source=EvidenceSource.ABSTRACT if paper.abstract else EvidenceSource.METADATA,
+    )
+
+
+def semantic_embedding_text(paper: PaperMetadata) -> str:
+    return " ".join(
+        part
+        for part in [
+            paper.title,
+            paper.abstract or "",
+            " ".join(paper.categories),
+        ]
+        if part
     )
 
 
@@ -1056,6 +1107,235 @@ def test_feedback_refinement_workflow_records_feedback_and_returns_updates(tmp_p
     assert workflow.recommendations[0].score_delta is not None
     assert workflow.recommendations[0].score_delta > 0
     assert len(store.list_feedback_events(recommendation_run_id="run-1")) == 1
+
+
+def test_feedback_refinement_supports_legacy_skill_without_semantic_context(
+    tmp_path,
+) -> None:
+    paper = make_paper(
+        "2604.00004",
+        "Feedback Agents for Paper Recommendation",
+        "Research briefing agents use feedback signals to rank papers.",
+    )
+    legacy_feedback = LegacyFeedbackSkill()
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=SQLitePaperStore(tmp_path / "papers.sqlite3"),
+        feedback_skill=legacy_feedback,
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_feedback_refinement(
+        [make_recommendation(paper, rank=1, score=2.0)],
+        feedback=[],
+        recommendation_run_id="run-legacy-feedback",
+        semantic_context={"provider": "fake"},
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    assert legacy_feedback.calls
+    assert "semantic_context" not in legacy_feedback.calls[0]
+
+
+def test_semantic_feedback_refinement_uses_originating_recommendation_context(
+    tmp_path,
+) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    seed = make_paper(
+        "2604.30001",
+        "Autonomous Lab Optimization",
+        "Closed-loop experiments improve molecular discovery.",
+    )
+    feedback_source = make_paper(
+        "2604.30002",
+        "Bayesian Experimental Design",
+        "Adaptive experiment selection improves chemical discovery.",
+    )
+    similar = make_paper(
+        "2604.30003",
+        "Active Learning for Molecular Experiments",
+        "Bayesian experiment selection accelerates chemical discovery.",
+    )
+    unrelated = make_paper(
+        "2604.30004",
+        "Compiler Register Allocation",
+        "Low-level compiler optimization for register pressure.",
+    )
+    vector_map = {
+        semantic_embedding_text(seed): [1.0, 0.0],
+        semantic_embedding_text(feedback_source): [1.0, 0.0],
+        semantic_embedding_text(similar): [1.0, 0.0],
+        semantic_embedding_text(unrelated): [0.0, 1.0],
+    }
+    config = AppConfig(
+        embedding_provider="fake",
+        embedding_model="fake-feedback",
+        embedding_dimensions=2,
+    )
+    ranking_provider = FakeEmbeddingProvider(dimensions=2, vector_map=vector_map)
+    feedback_provider = FakeEmbeddingProvider(dimensions=2, vector_map=vector_map)
+    semantic_ranking = SemanticSeedRankingSkill(
+        embedding_provider=ranking_provider,
+        store=store,
+        config=config,
+        minimum_semantic_similarity=0.0,
+    )
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=store,
+        retrieval_skill=StaticRetrievalSkill([similar, unrelated]),
+        semantic_ranking_skill=semantic_ranking,
+        feedback_skill=FeedbackRefinementSkill(
+            store=store,
+            embedding_provider=feedback_provider,
+            config=config,
+        ),
+        provider=FakeLLMProvider(),
+    )
+
+    recommendation_result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic=None,
+            category="cs.LG",
+            search_mode=SearchMode.BROAD,
+            candidate_pool_size=2,
+            max_requests=4,
+        ),
+        seed_preference=make_seed_preference([seed]),
+        top_k=2,
+        use_cache=False,
+        run_id="run-semantic-origin",
+    )
+
+    workflow = recommendation_result.data
+    assert workflow is not None
+    assert recommendation_result.status == SkillStatus.SUCCESS
+    assert workflow.recommendations
+    assert workflow.recommendations[0].semantic_context["semantic_context"][
+        "provider"
+    ] == "fake"
+
+    feedback_result = orchestrator.run_feedback_refinement(
+        workflow.recommendations,
+        feedback=[{"paper_id": feedback_source.paper_id, "value": "like"}],
+        papers=[feedback_source],
+        recommendation_run_id="run-semantic-origin",
+    )
+
+    assert feedback_result.status == SkillStatus.SUCCESS
+    feedback_workflow = feedback_result.data
+    assert feedback_workflow is not None
+    assert [step.skill for step in feedback_workflow.trace] == ["feedback_refinement"]
+    feedback_step = feedback_workflow.trace[0]
+    assert feedback_step.metadata["refinement_mode"] == "semantic_feedback"
+    assert feedback_step.metadata["semantic_provider"]["provider"] == "fake"
+    assert feedback_step.metadata["embedding_cache"]["hits"] >= 1
+    refined = feedback_workflow.recommendations
+    assert refined[0].feedback_influences
+    assert refined[0].refinement_status == FeedbackRefinementStatus.APPLIED
+    assert refined[0].score_breakdown is not None
+    assert refined[0].score_breakdown.feedback > 0
+
+
+def test_semantic_recommendation_applies_profile_feedback_semantically(
+    tmp_path,
+) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    seed = make_paper(
+        "2604.31001",
+        "Autonomous Lab Optimization",
+        "Closed-loop experiments improve molecular discovery.",
+    )
+    feedback_source = make_paper(
+        "2604.31002",
+        "Bayesian Experimental Design",
+        "Adaptive experiment selection improves chemical discovery.",
+    )
+    similar = make_paper(
+        "2604.31003",
+        "Active Learning for Molecular Experiments",
+        "Bayesian experiment selection accelerates chemical discovery.",
+    )
+    unrelated = make_paper(
+        "2604.31004",
+        "Compiler Register Allocation",
+        "Low-level compiler optimization for register pressure.",
+    )
+    store.save_feedback_event(
+        FeedbackEvent(
+            profile_id="demo",
+            paper_id=feedback_source.paper_id,
+            value=FeedbackValue.LIKE,
+            paper=feedback_source,
+        )
+    )
+    vector_map = {
+        semantic_embedding_text(seed): [1.0, 0.0],
+        semantic_embedding_text(feedback_source): [1.0, 0.0],
+        semantic_embedding_text(similar): [1.0, 0.0],
+        semantic_embedding_text(unrelated): [0.0, 1.0],
+    }
+    config = AppConfig(
+        embedding_provider="fake",
+        embedding_model="fake-feedback",
+        embedding_dimensions=2,
+    )
+    orchestrator = DailyArxivAgentOrchestrator(
+        store=store,
+        retrieval_skill=StaticRetrievalSkill([similar, unrelated]),
+        semantic_ranking_skill=SemanticSeedRankingSkill(
+            embedding_provider=FakeEmbeddingProvider(
+                dimensions=2,
+                vector_map=vector_map,
+            ),
+            store=store,
+            config=config,
+            minimum_semantic_similarity=0.0,
+        ),
+        feedback_skill=FeedbackRefinementSkill(
+            store=store,
+            embedding_provider=FakeEmbeddingProvider(
+                dimensions=2,
+                vector_map=vector_map,
+            ),
+            config=config,
+        ),
+        provider=FakeLLMProvider(),
+    )
+
+    result = orchestrator.run_recommendation(
+        RetrievalQuery(
+            topic=None,
+            category="cs.LG",
+            search_mode=SearchMode.BROAD,
+            candidate_pool_size=2,
+            max_requests=4,
+        ),
+        seed_preference=make_seed_preference([seed], profile_id="demo"),
+        profile_id="demo",
+        top_k=2,
+        use_cache=False,
+        run_id="run-semantic-profile-feedback",
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    workflow = result.data
+    assert workflow is not None
+    assert [step.skill for step in workflow.trace] == [
+        "query_planning",
+        "semantic_readiness",
+        "arxiv_retrieval",
+        "ranking",
+        "feedback_refinement",
+        "extraction",
+        "briefing",
+    ]
+    ranking_step = workflow.trace[3]
+    assert ranking_step.metadata["feedback_count"] == 0
+    feedback_step = workflow.trace[4]
+    assert feedback_step.metadata["refinement_mode"] == "semantic_feedback"
+    assert feedback_step.metadata["influence_count"] >= 1
+    assert workflow.recommendations[0].feedback_influences
+    assert workflow.recommendations[0].score_breakdown is not None
+    assert workflow.recommendations[0].score_breakdown.feedback > 0
 
 
 def test_followup_workflow_filters_stored_papers_without_fetching(tmp_path) -> None:

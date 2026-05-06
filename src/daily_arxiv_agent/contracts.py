@@ -78,6 +78,14 @@ class FeedbackValue(StrEnum):
     DISLIKE = "dislike"
 
 
+class FeedbackRefinementStatus(StrEnum):
+    """Status of a feedback adjustment attempt for one recommendation."""
+
+    APPLIED = "applied"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
 class ExplanationMode(StrEnum):
     """Supported selected-paper explanation modes."""
 
@@ -432,6 +440,28 @@ class RankingScoreBreakdown(BaseModel):
     signals: list[str] = Field(default_factory=list)
 
 
+class FeedbackInfluenceRecord(BaseModel):
+    """One explainable feedback effect on one recommendation candidate."""
+
+    source_paper_id: str
+    target_paper_id: str
+    similarity: float = Field(ge=-1.0, le=1.0)
+    signed_score_delta: float
+    value: FeedbackValue
+    refinement_status: FeedbackRefinementStatus
+    event_id: str | None = None
+    source_title: str | None = None
+    target_title: str | None = None
+
+    @field_validator("source_paper_id", "target_paper_id")
+    @classmethod
+    def require_feedback_influence_identity(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("feedback influence paper IDs must not be blank")
+        return normalized
+
+
 class SeedRecord(BaseModel):
     """One normalized seed contribution for personalization."""
 
@@ -488,6 +518,10 @@ class Recommendation(BaseModel):
     score_delta: float | None = None
     rank_delta: int | None = None
     score_breakdown: RankingScoreBreakdown | None = None
+    feedback_influences: list[FeedbackInfluenceRecord] = Field(default_factory=list)
+    refinement_status: FeedbackRefinementStatus | None = None
+    feedback_error: SkillError | None = None
+    semantic_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class FeedbackEvent(BaseModel):

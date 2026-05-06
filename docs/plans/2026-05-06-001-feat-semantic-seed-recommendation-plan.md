@@ -291,7 +291,7 @@ Implementation sequencing follows the phased delivery above. The first executabl
 **Verification:**
 - Embedding provider creation is deterministic under fake mode and live provider behavior is fully mockable in tests.
 
-- [ ] **Unit 3: Embedding Contracts and SQLite Cache**
+- [x] **Unit 3: Embedding Contracts and SQLite Cache**
 
 **Goal:** Persist embedding vectors and semantic diagnostics safely without repeated API calls or cache pollution across models.
 

@@ -1,6 +1,9 @@
 from datetime import date, datetime, timezone
+import sqlite3
 
 from daily_arxiv_agent.contracts import (
+    EmbeddingCacheScope,
+    EmbeddingInputRole,
     FeedbackEvent,
     FeedbackValue,
     PaperMetadata,
@@ -327,6 +330,269 @@ def test_sqlite_store_scopes_full_text_cache_by_source_url(tmp_path) -> None:
         )
         is None
     )
+
+
+def test_sqlite_store_saves_and_loads_embedding_by_identity(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    identity = SQLitePaperStore.embedding_identity(
+        provider="fake",
+        model="semantic-test",
+        dimensions=3,
+        input_version="paper-metadata-v1",
+        serialized_input={
+            "title": "Explainable Agents",
+            "abstract": "Agent workflows for daily research.",
+            "categories": ["cs.LG"],
+        },
+    )
+
+    assert identity is not None
+    saved = store.save_embedding(
+        identity,
+        [0.1, 0.2, 0.3],
+        input_role=EmbeddingInputRole.CANDIDATE,
+    )
+    loaded = store.load_embedding(identity)
+
+    assert saved is not None
+    assert loaded is not None
+    assert loaded.vector == [0.1, 0.2, 0.3]
+    assert loaded.identity == identity
+    assert loaded.input_role == EmbeddingInputRole.CANDIDATE
+    assert loaded.last_accessed_at >= loaded.created_at
+
+
+def test_embedding_cache_separates_provider_model_dimensions_and_scope(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    base_kwargs = {
+        "provider": "fake",
+        "input_version": "paper-metadata-v1",
+        "serialized_input": "Graph neural retrieval",
+    }
+    small = SQLitePaperStore.embedding_identity(
+        model="small",
+        dimensions=3,
+        **base_kwargs,
+    )
+    large = SQLitePaperStore.embedding_identity(
+        model="large",
+        dimensions=3,
+        **base_kwargs,
+    )
+    default_dimensions = SQLitePaperStore.embedding_identity(
+        model="small",
+        dimensions=None,
+        **base_kwargs,
+    )
+    next_input_version = SQLitePaperStore.embedding_identity(
+        provider="fake",
+        model="small",
+        dimensions=3,
+        input_version="paper-metadata-v2",
+        serialized_input="Graph neural retrieval",
+    )
+    seed_scoped = SQLitePaperStore.embedding_identity(
+        model="small",
+        dimensions=3,
+        cache_scope=EmbeddingCacheScope.PROFILE,
+        profile_id="demo",
+        **base_kwargs,
+    )
+
+    assert small is not None
+    assert large is not None
+    assert default_dimensions is not None
+    assert next_input_version is not None
+    assert seed_scoped is not None
+    store.save_embedding(small, [1.0, 0.0, 0.0])
+    store.save_embedding(large, [0.0, 1.0, 0.0])
+    store.save_embedding(default_dimensions, [0.5, 0.5])
+    store.save_embedding(next_input_version, [0.25, 0.25, 0.5])
+    store.save_embedding(
+        seed_scoped,
+        [0.0, 0.0, 1.0],
+        input_role=EmbeddingInputRole.SEED,
+    )
+
+    small_record = store.load_embedding(small)
+    large_record = store.load_embedding(large)
+    default_dimensions_record = store.load_embedding(default_dimensions)
+    next_input_version_record = store.load_embedding(next_input_version)
+    scoped_record = store.load_embedding(seed_scoped)
+
+    assert small_record is not None
+    assert large_record is not None
+    assert default_dimensions_record is not None
+    assert next_input_version_record is not None
+    assert scoped_record is not None
+    assert small_record.vector == [1.0, 0.0, 0.0]
+    assert large_record.vector == [0.0, 1.0, 0.0]
+    assert default_dimensions_record.vector == [0.5, 0.5]
+    assert next_input_version_record.vector == [0.25, 0.25, 0.5]
+    assert scoped_record.vector == [0.0, 0.0, 1.0]
+    assert scoped_record.input_role == EmbeddingInputRole.SEED
+
+
+def test_embedding_identity_hash_uses_normalized_serialized_input() -> None:
+    first = SQLitePaperStore.embedding_identity(
+        provider="fake",
+        model="semantic-test",
+        dimensions=3,
+        input_version="paper-metadata-v1",
+        serialized_input={
+            "title": "Graph   neural\nretrieval",
+            "abstract": "  daily   research\tagents ",
+        },
+    )
+    second = SQLitePaperStore.embedding_identity(
+        provider="fake",
+        model="semantic-test",
+        dimensions=3,
+        input_version="paper-metadata-v1",
+        serialized_input={
+            "abstract": "daily research agents",
+            "title": "Graph neural retrieval",
+        },
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.input_hash == second.input_hash
+
+
+def test_embedding_cache_preserves_created_at_when_vector_is_updated(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    identity = SQLitePaperStore.embedding_identity(
+        provider="fake",
+        model="semantic-test",
+        dimensions=3,
+        input_version="paper-metadata-v1",
+        serialized_input="Graph neural retrieval",
+    )
+
+    assert identity is not None
+    first = store.save_embedding(identity, [1.0, 0.0, 0.0])
+    second = store.save_embedding(identity, [0.0, 1.0, 0.0])
+    loaded = store.load_embedding(identity)
+
+    assert first is not None
+    assert second is not None
+    assert loaded is not None
+    assert second.created_at == first.created_at
+    assert loaded.created_at == first.created_at
+    assert loaded.vector == [0.0, 1.0, 0.0]
+    assert loaded.last_accessed_at >= second.last_accessed_at
+
+
+def test_clear_embedding_cache_preserves_other_storage_tables(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    paper = make_paper()
+    query = RetrievalQuery(topic="agents")
+    preference = SeedParsingSkill(metadata_client=None).build_preference(
+        ["Agent workflows for research paper recommendation"],
+        profile_id="demo",
+    ).data
+    event = FeedbackEvent(
+        profile_id="demo",
+        recommendation_run_id="run-1",
+        paper_id=paper.paper_id,
+        value=FeedbackValue.LIKE,
+        paper=paper,
+    )
+    identity = SQLitePaperStore.embedding_identity(
+        provider="fake",
+        model="semantic-test",
+        dimensions=3,
+        input_version="paper-metadata-v1",
+        serialized_input=paper.title,
+    )
+
+    assert preference is not None
+    assert identity is not None
+    store.save_retrieval(query, [paper])
+    store.save_seed_preference(preference)
+    store.save_feedback_event(event)
+    store.save_paper_full_text(paper.paper_id, "Full paper text.")
+    store.save_embedding(identity, [0.1, 0.2, 0.3])
+
+    assert store.clear_embedding_cache() == 1
+
+    assert store.load_embedding(identity) is None
+    assert store.load_retrieval(query) == [paper]
+    assert store.load_seed_preference("demo") == preference
+    assert store.list_feedback_events(profile_id="demo") == [event]
+    assert store.load_paper_full_text(paper.paper_id) == "Full paper text."
+
+
+def test_empty_embedding_input_is_not_cacheable_and_cache_disable_skips_persistence(
+    tmp_path,
+) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    empty_identity = SQLitePaperStore.embedding_identity(
+        provider="fake",
+        model="semantic-test",
+        dimensions=3,
+        input_version="paper-metadata-v1",
+        serialized_input=" \n\t ",
+    )
+    identity = SQLitePaperStore.embedding_identity(
+        provider="fake",
+        model="semantic-test",
+        dimensions=3,
+        input_version="paper-metadata-v1",
+        serialized_input="Usable text",
+    )
+
+    assert empty_identity is None
+    assert identity is not None
+    assert store.save_embedding(identity, [0.1, 0.2, 0.3], cache_enabled=False) is None
+    assert store.load_embedding(identity) is None
+
+
+def test_existing_database_initializes_embedding_schema_without_losing_rows(tmp_path) -> None:
+    db_path = tmp_path / "papers.sqlite3"
+    store = SQLitePaperStore(db_path)
+    paper = make_paper()
+    store.save_papers([paper])
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP TABLE embedding_cache")
+
+    upgraded = SQLitePaperStore(db_path)
+
+    assert upgraded.list_papers() == [paper]
+
+
+def test_corrupt_embedding_cache_payload_is_treated_as_miss(tmp_path) -> None:
+    store = SQLitePaperStore(tmp_path / "papers.sqlite3")
+    identity = SQLitePaperStore.embedding_identity(
+        provider="fake",
+        model="semantic-test",
+        dimensions=3,
+        input_version="paper-metadata-v1",
+        serialized_input="Usable text",
+    )
+
+    assert identity is not None
+    store.save_embedding(identity, [0.1, 0.2, 0.3])
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE embedding_cache
+            SET vector_json = ?
+            WHERE provider = ? AND model = ? AND dimensions_key = ?
+                AND input_version = ? AND input_hash = ?
+            """,
+            (
+                '{"not": "a vector"}',
+                identity.provider,
+                identity.model,
+                SQLitePaperStore.embedding_dimensions_key(identity.dimensions),
+                identity.input_version,
+                identity.input_hash,
+            ),
+        )
+
+    assert store.load_embedding(identity) is None
 
 
 def make_query_plan(

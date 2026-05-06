@@ -9,6 +9,12 @@ from daily_arxiv_agent.contracts import (
     BriefingTableRow,
     CandidatePoolTrendOverview,
     DailyBriefing,
+    EmbeddingCacheMetadata,
+    EmbeddingCacheScope,
+    EmbeddingIdentity,
+    EmbeddingInputRole,
+    EmbeddingProviderCacheMetadata,
+    EmbeddingVector,
     EvidenceSource,
     EvidenceBoundClaim,
     EvidenceSupportStatus,
@@ -272,6 +278,89 @@ def test_recommendation_can_expose_score_breakdown() -> None:
     assert recommendation.score_breakdown is not None
     assert recommendation.score_breakdown.total == 5.0
     assert recommendation.score_breakdown.signals == ["lexical", "phrase"]
+    assert recommendation.score_breakdown.semantic_seed == 0.0
+    assert recommendation.score_breakdown.semantic_similarities == []
+
+
+def test_embedding_contracts_capture_identity_vector_and_trace_safe_cache_metadata() -> None:
+    identity = EmbeddingIdentity(
+        provider="fake",
+        model="semantic-test",
+        dimensions=3,
+        input_version="paper-metadata-v1",
+        input_hash="abc123",
+        cache_scope=EmbeddingCacheScope.GLOBAL,
+    )
+    vector = EmbeddingVector(
+        identity=identity,
+        vector=[0.1, 0.2, 0.3],
+        input_role=EmbeddingInputRole.CANDIDATE,
+    )
+    cache_metadata = EmbeddingCacheMetadata(
+        enabled=True,
+        scope=EmbeddingCacheScope.GLOBAL,
+        hits=2,
+        misses=1,
+        writes=1,
+        corrupt_entries=0,
+    )
+    provider_metadata = EmbeddingProviderCacheMetadata(
+        provider="fake",
+        provider_mode="fake",
+        provider_label="fake:semantic-test",
+        model="semantic-test",
+        dimensions=3,
+        cache=cache_metadata,
+    )
+
+    payload_json = provider_metadata.model_dump_json()
+
+    assert vector.identity == identity
+    assert vector.vector == [0.1, 0.2, 0.3]
+    assert cache_metadata.requests == 3
+    assert "abc123" not in payload_json
+    assert "input_hash" not in payload_json
+
+
+def test_profile_scoped_embedding_identity_requires_profile_id() -> None:
+    with pytest.raises(ValidationError):
+        EmbeddingIdentity(
+            provider="fake",
+            model="semantic-test",
+            input_version="paper-metadata-v1",
+            input_hash="abc123",
+            cache_scope=EmbeddingCacheScope.PROFILE,
+        )
+
+    identity = EmbeddingIdentity(
+        provider="fake",
+        model="semantic-test",
+        input_version="paper-metadata-v1",
+        input_hash="abc123",
+        cache_scope=EmbeddingCacheScope.PROFILE,
+        profile_id="demo",
+    )
+
+    assert identity.profile_id == "demo"
+
+
+def test_seed_and_feedback_embedding_vectors_must_be_profile_scoped() -> None:
+    identity = EmbeddingIdentity(
+        provider="fake",
+        model="semantic-test",
+        dimensions=3,
+        input_version="paper-metadata-v1",
+        input_hash="abc123",
+        cache_scope=EmbeddingCacheScope.GLOBAL,
+    )
+
+    for role in (EmbeddingInputRole.SEED, EmbeddingInputRole.FEEDBACK):
+        with pytest.raises(ValidationError):
+            EmbeddingVector(
+                identity=identity,
+                vector=[0.1, 0.2, 0.3],
+                input_role=role,
+            )
 
 
 def test_minimal_daily_briefing_payloads_remain_valid() -> None:

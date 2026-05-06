@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from enum import StrEnum
+import math
 from typing import Any, Generic, TypeVar
 from uuid import uuid4
 
@@ -106,6 +107,147 @@ class RetrievalCacheStatus(StrEnum):
     COMPLETE = "complete"
     PARTIAL = "partial"
     PLANNER_CACHE = "planner_cache"
+
+
+class EmbeddingInputRole(StrEnum):
+    """Trace-safe role labels for embedding inputs."""
+
+    CANDIDATE = "candidate"
+    SEED = "seed"
+    FEEDBACK = "feedback"
+    QUERY = "query"
+
+
+class EmbeddingCacheScope(StrEnum):
+    """SQLite embedding cache visibility scope."""
+
+    GLOBAL = "global"
+    PROFILE = "profile"
+
+
+class EmbeddingIdentity(BaseModel):
+    """Stable identity for one serialized embedding input."""
+
+    provider: str
+    model: str
+    dimensions: int | None = Field(default=None, ge=1)
+    input_version: str
+    input_hash: str
+    cache_scope: EmbeddingCacheScope = EmbeddingCacheScope.GLOBAL
+    profile_id: str | None = None
+
+    @field_validator("provider", "model", "input_version", "input_hash")
+    @classmethod
+    def require_non_blank_identity_text(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("embedding identity fields must not be blank")
+        return normalized
+
+    @field_validator("profile_id")
+    @classmethod
+    def normalize_optional_profile_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(value.split())
+        return normalized or None
+
+    @model_validator(mode="after")
+    def validate_scope_shape(self) -> "EmbeddingIdentity":
+        if self.cache_scope == EmbeddingCacheScope.PROFILE and self.profile_id is None:
+            raise ValueError("profile-scoped embedding cache entries require profile_id")
+        if self.cache_scope == EmbeddingCacheScope.GLOBAL and self.profile_id is not None:
+            raise ValueError("global embedding cache entries must not include profile_id")
+        return self
+
+
+class SemanticSimilarityDetail(BaseModel):
+    """Compact semantic relatedness detail for one source-target pair."""
+
+    source_id: str
+    target_id: str
+    similarity: float = Field(ge=-1.0, le=1.0)
+    source_role: EmbeddingInputRole = EmbeddingInputRole.SEED
+    target_role: EmbeddingInputRole = EmbeddingInputRole.CANDIDATE
+    source_title: str | None = None
+    target_title: str | None = None
+    score: float = 0.0
+
+    @field_validator("source_id", "target_id")
+    @classmethod
+    def require_similarity_identity(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("semantic similarity identities must not be blank")
+        return normalized
+
+
+class EmbeddingVector(BaseModel):
+    """Cached embedding vector plus lifecycle metadata."""
+
+    identity: EmbeddingIdentity
+    vector: list[float] = Field(min_length=1)
+    input_role: EmbeddingInputRole = EmbeddingInputRole.CANDIDATE
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_accessed_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("vector")
+    @classmethod
+    def validate_vector(cls, value: list[float]) -> list[float]:
+        vector = [float(item) for item in value]
+        if not all(math.isfinite(item) for item in vector):
+            raise ValueError("embedding vector values must be finite")
+        return vector
+
+    @model_validator(mode="after")
+    def validate_vector_dimensions(self) -> "EmbeddingVector":
+        expected_dimensions = self.identity.dimensions
+        if expected_dimensions is not None and len(self.vector) != expected_dimensions:
+            raise ValueError("embedding vector dimensions do not match identity")
+        if (
+            self.input_role in {EmbeddingInputRole.SEED, EmbeddingInputRole.FEEDBACK}
+            and self.identity.cache_scope != EmbeddingCacheScope.PROFILE
+        ):
+            raise ValueError("seed and feedback embedding cache entries must be profile-scoped")
+        return self
+
+
+class EmbeddingCacheMetadata(BaseModel):
+    """Aggregate cache status safe for normal trace/UI output."""
+
+    enabled: bool = True
+    scope: EmbeddingCacheScope = EmbeddingCacheScope.GLOBAL
+    hits: int = Field(default=0, ge=0)
+    misses: int = Field(default=0, ge=0)
+    writes: int = Field(default=0, ge=0)
+    disabled_requests: int = Field(default=0, ge=0)
+    corrupt_entries: int = Field(default=0, ge=0)
+
+    @property
+    def requests(self) -> int:
+        return self.hits + self.misses + self.disabled_requests
+
+
+class EmbeddingProviderCacheMetadata(BaseModel):
+    """Provider and aggregate cache metadata without raw inputs or cache keys."""
+
+    provider: str
+    provider_mode: str
+    provider_label: str
+    model: str
+    dimensions: int | None = Field(default=None, ge=1)
+    cache: EmbeddingCacheMetadata = Field(default_factory=EmbeddingCacheMetadata)
+
+    @field_validator("provider", "provider_mode", "provider_label", "model")
+    @classmethod
+    def require_provider_metadata_text(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("embedding provider metadata fields must not be blank")
+        return normalized
 
 
 class Provenance(BaseModel):
@@ -279,12 +421,14 @@ class RankingScoreBreakdown(BaseModel):
     recency: float = 0.0
     category: float = 0.0
     seed_similarity: float = 0.0
+    semantic_seed: float = 0.0
     feedback: float = 0.0
     total: float = 0.0
     evidence_score: float = 0.0
     fallback: bool = False
     matched_terms: list[str] = Field(default_factory=list)
     matched_phrases: list[str] = Field(default_factory=list)
+    semantic_similarities: list[SemanticSimilarityDetail] = Field(default_factory=list)
     signals: list[str] = Field(default_factory=list)
 
 

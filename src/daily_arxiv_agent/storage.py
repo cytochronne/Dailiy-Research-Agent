@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Mapping
 
+from pydantic import ValidationError
+
 from .contracts import (
+    EmbeddingCacheScope,
+    EmbeddingIdentity,
+    EmbeddingInputRole,
+    EmbeddingVector,
     FeedbackEvent,
     PaperMetadata,
     QueryPlan,
@@ -25,6 +32,9 @@ class SQLitePaperStore:
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
+        self._db_file_existed = (
+            str(self.db_path) == ":memory:" or self.db_path.exists()
+        )
         self.initialize()
 
     def initialize(self) -> None:
@@ -86,9 +96,36 @@ class SQLitePaperStore:
                     full_text TEXT NOT NULL,
                     cached_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS embedding_cache (
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    dimensions_key TEXT NOT NULL,
+                    dimensions INTEGER,
+                    input_version TEXT NOT NULL,
+                    input_hash TEXT NOT NULL,
+                    input_role TEXT NOT NULL DEFAULT 'candidate',
+                    cache_scope TEXT NOT NULL DEFAULT 'global',
+                    profile_id TEXT NOT NULL DEFAULT '',
+                    vector_json TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    PRIMARY KEY (
+                        provider,
+                        model,
+                        dimensions_key,
+                        input_version,
+                        input_hash,
+                        cache_scope,
+                        profile_id
+                    )
+                );
                 """
             )
             self._ensure_retrieval_schema(connection)
+            self._ensure_embedding_schema(connection)
+        self._apply_new_db_file_permissions()
 
     def _ensure_retrieval_schema(self, connection: sqlite3.Connection) -> None:
         self._ensure_column(
@@ -114,6 +151,44 @@ class SQLitePaperStore:
             "retrieval_results",
             "source_metadata_json",
             "source_metadata_json TEXT NOT NULL DEFAULT '[]'",
+        )
+
+    def _ensure_embedding_schema(self, connection: sqlite3.Connection) -> None:
+        self._ensure_column(
+            connection,
+            "embedding_cache",
+            "input_role",
+            "input_role TEXT NOT NULL DEFAULT 'candidate'",
+        )
+        self._ensure_column(
+            connection,
+            "embedding_cache",
+            "cache_scope",
+            "cache_scope TEXT NOT NULL DEFAULT 'global'",
+        )
+        self._ensure_column(
+            connection,
+            "embedding_cache",
+            "profile_id",
+            "profile_id TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column(
+            connection,
+            "embedding_cache",
+            "metadata_json",
+            "metadata_json TEXT NOT NULL DEFAULT '{}'",
+        )
+        self._ensure_column(
+            connection,
+            "embedding_cache",
+            "created_at",
+            "created_at TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column(
+            connection,
+            "embedding_cache",
+            "last_accessed_at",
+            "last_accessed_at TEXT NOT NULL DEFAULT ''",
         )
 
     @staticmethod
@@ -515,6 +590,150 @@ class SQLitePaperStore:
             return None
         return str(row["full_text"])
 
+    def save_embedding(
+        self,
+        identity: EmbeddingIdentity | None,
+        vector: Iterable[float],
+        *,
+        input_role: EmbeddingInputRole | str = EmbeddingInputRole.CANDIDATE,
+        metadata: Mapping[str, Any] | None = None,
+        cache_enabled: bool = True,
+    ) -> EmbeddingVector | None:
+        if not cache_enabled or identity is None:
+            return None
+
+        with self._connect() as connection:
+            now = datetime.now(timezone.utc)
+            created_at = self._embedding_created_at(connection, identity) or now
+            record = EmbeddingVector(
+                identity=identity,
+                vector=list(vector),
+                input_role=EmbeddingInputRole(input_role),
+                created_at=created_at,
+                last_accessed_at=now,
+                metadata=dict(metadata or {}),
+            )
+            connection.execute(
+                """
+                INSERT INTO embedding_cache (
+                    provider,
+                    model,
+                    dimensions_key,
+                    dimensions,
+                    input_version,
+                    input_hash,
+                    input_role,
+                    cache_scope,
+                    profile_id,
+                    vector_json,
+                    metadata_json,
+                    created_at,
+                    last_accessed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(
+                    provider,
+                    model,
+                    dimensions_key,
+                    input_version,
+                    input_hash,
+                    cache_scope,
+                    profile_id
+                )
+                DO UPDATE SET
+                    input_role = excluded.input_role,
+                    dimensions = excluded.dimensions,
+                    vector_json = excluded.vector_json,
+                    metadata_json = excluded.metadata_json,
+                    last_accessed_at = excluded.last_accessed_at
+                """,
+                self._embedding_row(record),
+            )
+        return record
+
+    def load_embedding(
+        self,
+        identity: EmbeddingIdentity | None,
+        *,
+        cache_enabled: bool = True,
+    ) -> EmbeddingVector | None:
+        if not cache_enabled or identity is None:
+            return None
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    input_role,
+                    vector_json,
+                    metadata_json,
+                    created_at,
+                    last_accessed_at
+                FROM embedding_cache
+                WHERE provider = ?
+                    AND model = ?
+                    AND dimensions_key = ?
+                    AND input_version = ?
+                    AND input_hash = ?
+                    AND cache_scope = ?
+                    AND profile_id = ?
+                """,
+                self._embedding_identity_lookup(identity),
+            ).fetchone()
+            if row is None:
+                return None
+
+            record = self._embedding_from_row(identity, row)
+            if record is None:
+                return None
+
+            accessed_at = datetime.now(timezone.utc)
+            connection.execute(
+                """
+                UPDATE embedding_cache
+                SET last_accessed_at = ?
+                WHERE provider = ?
+                    AND model = ?
+                    AND dimensions_key = ?
+                    AND input_version = ?
+                    AND input_hash = ?
+                    AND cache_scope = ?
+                    AND profile_id = ?
+                """,
+                (
+                    accessed_at.isoformat(),
+                    *self._embedding_identity_lookup(identity),
+                ),
+            )
+        return record.model_copy(update={"last_accessed_at": accessed_at})
+
+    def clear_embedding_cache(
+        self,
+        *,
+        cache_scope: EmbeddingCacheScope | str | None = None,
+        profile_id: str | None = None,
+    ) -> int:
+        sql = "DELETE FROM embedding_cache"
+        clauses: list[str] = []
+        params: list[str] = []
+        if cache_scope is not None:
+            scope = (
+                cache_scope.value
+                if isinstance(cache_scope, EmbeddingCacheScope)
+                else str(cache_scope)
+            )
+            clauses.append("cache_scope = ?")
+            params.append(scope)
+        if profile_id is not None:
+            clauses.append("profile_id = ?")
+            params.append(" ".join(profile_id.split()))
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+
+        with self._connect() as connection:
+            cursor = connection.execute(sql, params)
+            return max(cursor.rowcount, 0)
+
     @staticmethod
     def query_key(query: RetrievalQuery) -> str:
         payload = query.model_dump(mode="json")
@@ -547,10 +766,57 @@ class SQLitePaperStore:
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
+    @classmethod
+    def embedding_identity(
+        cls,
+        *,
+        provider: str,
+        model: str,
+        dimensions: int | None = None,
+        input_version: str,
+        serialized_input: Any,
+        cache_scope: EmbeddingCacheScope | str = EmbeddingCacheScope.GLOBAL,
+        profile_id: str | None = None,
+    ) -> EmbeddingIdentity | None:
+        normalized_input = cls.normalized_embedding_input(serialized_input)
+        if normalized_input is None:
+            return None
+        input_hash = hashlib.sha256(normalized_input.encode("utf-8")).hexdigest()
+        return EmbeddingIdentity(
+            provider=provider,
+            model=model,
+            dimensions=dimensions,
+            input_version=input_version,
+            input_hash=input_hash,
+            cache_scope=EmbeddingCacheScope(cache_scope),
+            profile_id=profile_id,
+        )
+
+    @classmethod
+    def normalized_embedding_input(cls, serialized_input: Any) -> str | None:
+        payload = cls._normalize_embedding_payload(serialized_input)
+        if not cls._embedding_payload_has_text(payload):
+            return None
+        if isinstance(payload, str):
+            return payload
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def embedding_dimensions_key(dimensions: int | None) -> str:
+        return "default" if dimensions is None else str(dimensions)
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _apply_new_db_file_permissions(self) -> None:
+        if self._db_file_existed or str(self.db_path) == ":memory:":
+            return
+        try:
+            self.db_path.chmod(0o600)
+        except OSError:
+            return
 
     @staticmethod
     def _load_retrieval_run(
@@ -626,6 +892,145 @@ class SQLitePaperStore:
         except json.JSONDecodeError:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _embedding_row(
+        record: EmbeddingVector,
+    ) -> tuple[
+        str,
+        str,
+        str,
+        int | None,
+        str,
+        str,
+        str,
+        str,
+        str,
+        str,
+        str,
+        str,
+        str,
+    ]:
+        identity = record.identity
+        return (
+            identity.provider,
+            identity.model,
+            SQLitePaperStore.embedding_dimensions_key(identity.dimensions),
+            identity.dimensions,
+            identity.input_version,
+            identity.input_hash,
+            record.input_role.value,
+            identity.cache_scope.value,
+            identity.profile_id or "",
+            json.dumps(record.vector),
+            json.dumps(record.metadata, sort_keys=True),
+            record.created_at.isoformat(),
+            record.last_accessed_at.isoformat(),
+        )
+
+    @staticmethod
+    def _embedding_identity_lookup(
+        identity: EmbeddingIdentity,
+    ) -> tuple[str, str, str, str, str, str, str]:
+        return (
+            identity.provider,
+            identity.model,
+            SQLitePaperStore.embedding_dimensions_key(identity.dimensions),
+            identity.input_version,
+            identity.input_hash,
+            identity.cache_scope.value,
+            identity.profile_id or "",
+        )
+
+    @staticmethod
+    def _embedding_created_at(
+        connection: sqlite3.Connection,
+        identity: EmbeddingIdentity,
+    ) -> datetime | None:
+        row = connection.execute(
+            """
+            SELECT created_at
+            FROM embedding_cache
+            WHERE provider = ?
+                AND model = ?
+                AND dimensions_key = ?
+                AND input_version = ?
+                AND input_hash = ?
+                AND cache_scope = ?
+                AND profile_id = ?
+            """,
+            SQLitePaperStore._embedding_identity_lookup(identity),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return SQLitePaperStore._datetime_from_cache_value(row["created_at"])
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _embedding_from_row(
+        identity: EmbeddingIdentity,
+        row: sqlite3.Row,
+    ) -> EmbeddingVector | None:
+        try:
+            vector = json.loads(row["vector_json"])
+            metadata = SQLitePaperStore._metadata_from_json(row["metadata_json"])
+            created_at = SQLitePaperStore._datetime_from_cache_value(
+                row["created_at"],
+            )
+            last_accessed_at = SQLitePaperStore._datetime_from_cache_value(
+                row["last_accessed_at"],
+            )
+            return EmbeddingVector(
+                identity=identity,
+                vector=vector,
+                input_role=EmbeddingInputRole(row["input_role"]),
+                created_at=created_at,
+                last_accessed_at=last_accessed_at,
+                metadata=metadata,
+            )
+        except (json.JSONDecodeError, TypeError, ValueError, ValidationError):
+            return None
+
+    @staticmethod
+    def _datetime_from_cache_value(value: str | None) -> datetime:
+        if not value:
+            return datetime.now(timezone.utc)
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _normalize_embedding_payload(value: Any) -> Any:
+        if isinstance(value, str):
+            return " ".join(value.split())
+        if isinstance(value, Mapping):
+            return {
+                str(key): SQLitePaperStore._normalize_embedding_payload(item)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(value, (list, tuple)):
+            return [SQLitePaperStore._normalize_embedding_payload(item) for item in value]
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        return " ".join(str(value).split())
+
+    @staticmethod
+    def _embedding_payload_has_text(value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(value)
+        if isinstance(value, Mapping):
+            return any(
+                SQLitePaperStore._embedding_payload_has_text(item)
+                for item in value.values()
+            )
+        if isinstance(value, list):
+            return any(
+                SQLitePaperStore._embedding_payload_has_text(item) for item in value
+            )
+        return False
 
     @staticmethod
     def _paper_full_text_cache_key(paper_id: str, source_url: str | None) -> str:

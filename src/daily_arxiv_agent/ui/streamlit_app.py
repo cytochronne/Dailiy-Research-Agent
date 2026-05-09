@@ -67,21 +67,28 @@ RECOMMENDATION_MODE_LABELS = {
 APP_CSS = """
 <style>
 :root {
-  --paper: #f2ecdf;
-  --paper-strong: #f9f5eb;
-  --ink: #1f2933;
-  --muted: #5b6573;
+  --canvas: #f3f7f4;
+  --canvas-deep: #e6eee8;
+  --surface: #fffffd;
+  --surface-muted: #edf4f0;
+  --ink: #1c2733;
+  --ink-strong: #0f172a;
+  --muted: #586879;
   --accent: #0f766e;
-  --accent-strong: #115e59;
-  --accent-pressed: #0b4541;
-  --accent-text: #fffaf0;
-  --accent-soft: rgba(15, 118, 110, 0.1);
-  --border: rgba(31, 41, 51, 0.12);
+  --accent-strong: #0c5f59;
+  --accent-pressed: #083f3b;
+  --accent-text: #ffffff;
+  --accent-soft: rgba(15, 118, 110, 0.11);
+  --blue: #315f84;
+  --blue-soft: rgba(49, 95, 132, 0.1);
+  --amber: #9a6616;
+  --border: rgba(15, 23, 42, 0.13);
+  --border-strong: rgba(15, 23, 42, 0.22);
+  --shadow: 0 14px 34px rgba(15, 23, 42, 0.08);
 }
 [data-testid="stAppViewContainer"] {
   background:
-    radial-gradient(circle at top left, rgba(255, 250, 240, 0.96), transparent 36%),
-    linear-gradient(180deg, #f8f3e7 0%, var(--paper) 45%, #ebe4d6 100%);
+    linear-gradient(180deg, #f8fbf8 0%, var(--canvas) 48%, var(--canvas-deep) 100%);
   color: var(--ink);
 }
 [data-testid="stAppViewContainer"] :where(
@@ -117,11 +124,13 @@ APP_CSS = """
   color: var(--ink) !important;
 }
 [data-testid="stHeader"] {
-  background: rgba(248, 243, 231, 0.82);
+  background: rgba(248, 251, 248, 0.88);
   backdrop-filter: blur(10px);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
 }
 [data-testid="stSidebar"] {
-  background: rgba(249, 245, 235, 0.92);
+  background: rgba(255, 255, 253, 0.94);
+  border-right: 1px solid var(--border);
 }
 [data-testid="stMarkdownContainer"],
 [data-testid="stMarkdownContainer"] * {
@@ -133,20 +142,43 @@ APP_CSS = """
 [data-testid="stWidgetLabel"] {
   color: var(--ink) !important;
 }
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 {
+  color: var(--ink-strong) !important;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-size: 1.28rem;
+  letter-spacing: 0;
+}
 [data-testid="stTextInputRootElement"] input,
 [data-testid="stNumberInputRootElement"] input,
 [data-testid="stTextArea"] textarea,
 [data-baseweb="select"] > div,
 [data-baseweb="select"] input {
   color: var(--ink) !important;
-  background: rgba(255, 252, 247, 0.92) !important;
-  border-color: rgba(31, 41, 51, 0.16) !important;
+  background: rgba(255, 255, 253, 0.96) !important;
+  border-color: var(--border) !important;
+  border-radius: 8px !important;
+}
+[data-testid="stTextInputRootElement"],
+[data-testid="stNumberInputRootElement"],
+[data-testid="stTextArea"] [data-baseweb="textarea"],
+[data-baseweb="select"] > div {
+  background: rgba(255, 255, 253, 0.96) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
 }
 [data-testid="stTextInputRootElement"] input::placeholder,
 [data-testid="stNumberInputRootElement"] input::placeholder,
 [data-testid="stTextArea"] textarea::placeholder,
 [data-baseweb="select"] input::placeholder {
   color: #6b7280 !important;
+}
+[data-testid="stTextInputRootElement"]:focus-within,
+[data-testid="stNumberInputRootElement"]:focus-within,
+[data-testid="stTextArea"]:focus-within,
+[data-baseweb="select"]:focus-within,
+[data-testid="stDateInputField"]:focus-within {
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.16) !important;
+  border-radius: 8px !important;
 }
 [data-baseweb="select"] svg,
 [data-testid="stDateInputField"] svg {
@@ -155,20 +187,35 @@ APP_CSS = """
 [data-testid="stDateInputField"],
 [data-testid="stDateInputField"] input {
   color: var(--ink) !important;
-  background: rgba(255, 252, 247, 0.92) !important;
+  background: rgba(255, 255, 253, 0.96) !important;
+  border-color: var(--border) !important;
+  border-radius: 8px !important;
+}
+[data-testid="stSlider"] [role="slider"] {
+  background: var(--accent) !important;
+  box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.12) !important;
+}
+[data-testid="stSlider"] [data-testid="stSliderThumbValue"],
+[data-testid="stSlider"] [data-testid="stSliderThumbValue"] * {
+  color: var(--accent) !important;
+  font-weight: 800 !important;
 }
 [data-testid="stAlertContent"] p,
 [data-testid="stAlertContent"] span,
 [data-testid="stAlertContent"] div {
   color: inherit !important;
 }
+[data-testid="stAlert"] {
+  border-radius: 8px !important;
+  border: 1px solid rgba(15, 23, 42, 0.08) !important;
+}
 [data-testid="stFormSubmitButton"] button,
 .stButton > button {
   color: var(--accent-text) !important;
-  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-strong) 100%) !important;
-  border: 1px solid rgba(8, 65, 61, 0.28) !important;
-  border-radius: 14px !important;
-  box-shadow: 0 10px 22px rgba(15, 118, 110, 0.18) !important;
+  background: var(--accent) !important;
+  border: 1px solid rgba(8, 65, 61, 0.3) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 8px 18px rgba(15, 118, 110, 0.18) !important;
   font-weight: 700 !important;
   transition:
     background 160ms ease,
@@ -178,9 +225,9 @@ APP_CSS = """
 [data-testid="stFormSubmitButton"] button:hover,
 .stButton > button:hover {
   color: var(--accent-text) !important;
-  background: linear-gradient(180deg, #14877f 0%, #0f5954 100%) !important;
+  background: var(--accent-strong) !important;
   border-color: rgba(8, 65, 61, 0.36) !important;
-  box-shadow: 0 14px 28px rgba(15, 118, 110, 0.24) !important;
+  box-shadow: 0 12px 22px rgba(15, 118, 110, 0.22) !important;
   transform: translateY(-1px);
 }
 [data-testid="stFormSubmitButton"] button:active,
@@ -197,86 +244,243 @@ APP_CSS = """
   color: var(--accent-text) !important;
   outline: 3px solid rgba(15, 118, 110, 0.24) !important;
   outline-offset: 2px !important;
-  box-shadow: 0 0 0 2px rgba(255, 250, 240, 0.88), 0 0 0 6px rgba(15, 118, 110, 0.18) !important;
+  box-shadow: 0 0 0 2px rgba(255, 255, 253, 0.9), 0 0 0 6px rgba(15, 118, 110, 0.18) !important;
 }
 [data-testid="stFormSubmitButton"] button:disabled,
 .stButton > button:disabled {
-  color: rgba(255, 250, 240, 0.82) !important;
+  color: rgba(255, 255, 253, 0.82) !important;
   background: #7fa6a1 !important;
   border-color: transparent !important;
   box-shadow: none !important;
   cursor: not-allowed !important;
 }
 .block-container {
-  max-width: 1240px;
-  padding-top: 1.5rem;
+  max-width: 1260px;
+  padding-top: 1.75rem;
   padding-bottom: 3rem;
 }
-.hero-shell,
+.workspace-header,
 .section-shell {
-  border: 1px solid var(--border);
-  border-radius: 22px;
-  background: rgba(249, 245, 235, 0.88);
-  box-shadow: 0 16px 40px rgba(31, 41, 51, 0.08);
   animation: rise 0.42s ease both;
 }
-.hero-shell {
-  padding: 1.5rem 1.6rem;
-  background:
-    linear-gradient(135deg, rgba(255, 250, 240, 0.98), rgba(226, 241, 236, 0.92));
+.workspace-header {
+  padding: 1.6rem 0 1.15rem;
+  border-bottom: 1px solid var(--border);
+}
+.workspace-header__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16rem;
+  gap: 1.25rem;
+  align-items: end;
+}
+.workspace-header__note {
+  border-left: 3px solid var(--accent);
+  padding: 0.75rem 0 0.75rem 0.95rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.55;
+  background: linear-gradient(90deg, rgba(15, 118, 110, 0.08), transparent);
 }
 .section-shell {
-  padding: 1rem 1.15rem 0.35rem;
-  margin-bottom: 1rem;
+  border-top: 1px solid var(--border);
+  padding: 1.2rem 0 0.2rem;
+  margin: 1.65rem 0 0.9rem;
 }
 .hero-kicker {
-  margin: 0 0 0.35rem;
+  margin: 0;
   color: var(--accent);
   font-size: 0.78rem;
   font-weight: 700;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 .hero-title {
   margin: 0;
-  color: #102a43;
+  color: var(--ink-strong);
   font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
-  font-size: 2.55rem;
-  line-height: 1.04;
+  font-size: 2.2rem;
+  line-height: 1.08;
+  max-width: 50rem;
 }
 .hero-copy {
-  margin: 0.8rem 0 0;
+  margin: 0.7rem 0 0;
   color: var(--muted);
   font-size: 1rem;
-  line-height: 1.6;
-  max-width: 46rem;
+  line-height: 1.55;
+  max-width: 48rem;
 }
 .pill-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.45rem;
-  margin-top: 1rem;
+  gap: 0.5rem;
+  margin: 0.85rem 0 0.85rem;
 }
 .pill {
   display: inline-flex;
   align-items: center;
-  border: 1px solid rgba(15, 118, 110, 0.18);
+  border: 1px solid rgba(49, 95, 132, 0.18);
   border-radius: 999px;
-  padding: 0.32rem 0.72rem;
-  color: #134e4a;
-  background: rgba(255, 255, 255, 0.55);
+  padding: 0.34rem 0.72rem;
+  color: #244b68;
+  background: rgba(255, 255, 253, 0.78);
   font-size: 0.86rem;
+  font-weight: 650;
+}
+.pill strong {
+  color: var(--ink-strong) !important;
+  font-weight: 750;
 }
 .section-title {
   margin: 0 0 0.25rem;
-  color: #102a43;
+  color: var(--ink-strong);
   font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
-  font-size: 1.5rem;
+  font-size: 1.42rem;
 }
 .section-copy {
-  margin: 0 0 0.85rem;
+  margin: 0 0 0.55rem;
   color: var(--muted);
   font-size: 0.95rem;
+  line-height: 1.5;
+  max-width: 58rem;
+}
+.section-kicker {
+  margin: 0 0 0.25rem;
+  color: var(--blue);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+.run-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.55rem;
+  margin: 0.7rem 0 0.45rem;
+}
+.summary-tile {
+  min-height: 4.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 253, 0.82);
+  padding: 0.72rem 0.78rem;
+}
+.summary-tile__label {
+  display: block;
+  margin-bottom: 0.32rem;
+  color: var(--muted) !important;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.summary-tile__value {
+  display: block;
+  color: var(--ink-strong) !important;
+  font-size: 1.08rem;
+  font-weight: 800;
+  line-height: 1.18;
+  overflow-wrap: anywhere;
+}
+.briefing-callout,
+.evidence-panel,
+.explanation-panel {
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  background: rgba(255, 255, 253, 0.86);
+  box-shadow: var(--shadow);
+  margin: 0.7rem 0 1rem;
+  padding: 1rem 1.05rem;
+}
+.briefing-callout h3,
+.evidence-panel h3,
+.explanation-panel h3 {
+  margin: 0 0 0.42rem;
+  color: var(--ink-strong) !important;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-size: 1.25rem;
+}
+.briefing-callout p,
+.evidence-panel p,
+.explanation-panel p {
+  margin: 0;
+  color: var(--ink) !important;
+  line-height: 1.58;
+}
+.metadata-line {
+  margin-top: 0.55rem !important;
+  color: var(--muted) !important;
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+[data-testid="stMetric"] {
+  min-height: 4.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 253, 0.76);
+  padding: 0.62rem 0.74rem;
+  box-shadow: none;
+}
+[data-testid="stMetricLabel"] p {
+  color: var(--muted) !important;
+  font-size: 0.72rem !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+}
+[data-testid="stMetricValue"] {
+  color: var(--ink-strong) !important;
+}
+[data-testid="stDataFrame"],
+[data-testid="stTable"] {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+[data-testid="stExpander"] {
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  background: rgba(255, 255, 253, 0.78) !important;
+  box-shadow: none !important;
+}
+[data-testid="stExpander"] summary {
+  font-weight: 750 !important;
+}
+[data-baseweb="tab-list"] {
+  gap: 0.25rem;
+}
+[data-baseweb="tab"] {
+  border-radius: 8px 8px 0 0 !important;
+  color: var(--muted) !important;
+  font-weight: 750 !important;
+}
+[data-baseweb="tab"][aria-selected="true"] {
+  color: var(--accent) !important;
+  background: rgba(15, 118, 110, 0.08) !important;
+}
+@media (max-width: 900px) {
+  .workspace-header__grid,
+  .run-summary-grid {
+    grid-template-columns: 1fr;
+  }
+  .hero-title {
+    font-size: 1.86rem;
+  }
+  .workspace-header__note {
+    padding-top: 0.62rem;
+    padding-bottom: 0.62rem;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-header,
+  .section-shell {
+    animation: none;
+  }
+  [data-testid="stFormSubmitButton"] button,
+  .stButton > button {
+    transition: none !important;
+  }
 }
 @keyframes rise {
   from {
@@ -901,7 +1105,7 @@ def main() -> None:
         page_icon="📚",
         layout="wide",
     )
-    st.markdown(APP_CSS, unsafe_allow_html=True)
+    _render_app_css(st)
     _ensure_session_state(st.session_state)
     initial_runtime_error = st.session_state.get("ui_runtime_error")
     _render_sidebar(st, st.session_state)
@@ -975,6 +1179,14 @@ def _render_sidebar(st: Any, state: MutableMapping[str, Any]) -> None:
         )
 
 
+def _render_app_css(st: Any) -> None:
+    html = getattr(st, "html", None)
+    if callable(html):
+        html(APP_CSS)
+        return
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+
+
 def _render_hero(st: Any, state: Mapping[str, Any]) -> None:
     workflow = _workflow_from_result(state.get("recommendation_result"))
     metrics = {
@@ -984,23 +1196,28 @@ def _render_hero(st: Any, state: Mapping[str, Any]) -> None:
     }
     st.markdown(
         """
-<div class="hero-shell">
-  <p class="hero-kicker">Unit 7 Demo Surface</p>
-  <h1 class="hero-title">Daily arXiv Research Briefing Agent</h1>
-  <p class="hero-copy">
-    A local orchestration console for retrieval, ranking, briefing, feedback refinement,
-    follow-up filtering, and selected-paper explanation. The UI favors traceability over polish:
-    every step keeps its evidence labels, fallbacks, and run IDs visible.
-  </p>
-</div>
+<section class="workspace-header" aria-label="Daily arXiv workspace">
+  <div class="workspace-header__grid">
+    <div>
+      <h1 class="hero-title">Daily arXiv Research Briefing Agent</h1>
+      <p class="hero-copy">
+        Configure a run, inspect ranked papers, and keep evidence boundaries visible while feedback
+        changes the recommendation surface.
+      </p>
+    </div>
+    <p class="workspace-header__note">
+      Current session state is local. Live providers are used only when selected in runtime settings.
+    </p>
+  </div>
+</section>
         """,
         unsafe_allow_html=True,
     )
     pills = [
-        f"LLM mode: {PROVIDER_MODES[state['provider_mode']]}",
+        f"Runtime: {PROVIDER_MODES[state['provider_mode']]}",
         f"Profile: {state['profile_id']}",
         f"Store: {state['db_path']}",
-        f"Recommendations loaded: {metrics['recommended']}",
+        f"Loaded: {metrics['recommended']} recommendation(s)",
     ]
     st.markdown(
         "<div class='pill-row'>"
@@ -1015,17 +1232,14 @@ def _render_hero(st: Any, state: Mapping[str, Any]) -> None:
 
 
 def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -> None:
-    st.markdown(
-        """
-<div class="section-shell">
-  <h2 class="section-title">Recommendation Workflow</h2>
-  <p class="section-copy">
-    Run the end-to-end Agent workflow from retrieval through briefing. Seed papers are optional and
-    can be entered one per line as arXiv IDs, arXiv URLs, or titles.
-  </p>
-</div>
-        """,
-        unsafe_allow_html=True,
+    _render_section_header(
+        st,
+        eyebrow="Run setup",
+        title="Recommendation Workspace",
+        copy=(
+            "Set retrieval scope, optional seed papers, and ranking mode before "
+            "running the briefing workflow."
+        ),
     )
     today = date.today()
     search_options = [mode.value for mode in SearchMode]
@@ -1130,13 +1344,7 @@ def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -
     workflow = _workflow_from_result(recommendation_result)
     if workflow is not None:
         summary = recommendation_summary_metrics(workflow)
-        run_columns = st.columns(6)
-        run_columns[0].metric("Run ID", summary["run_id"])
-        run_columns[1].metric("Candidates", summary["candidates_retrieved"])
-        run_columns[2].metric("Recommendations", summary["recommendations_shown"])
-        run_columns[3].metric("Planner", str(summary["planner_source"]))
-        run_columns[4].metric("Fallback", summary["planner_fallback"])
-        run_columns[5].metric("Cache", summary["cache_status"])
+        _render_run_summary(st, summary)
         st.caption(
             f"Candidate pool target: {summary['candidate_pool_size']} | "
             f"Cache hit: {summary['cache_hit']} | "
@@ -1182,17 +1390,14 @@ def _render_recommendation_workspace(st: Any, state: MutableMapping[str, Any]) -
 
 
 def _render_feedback_and_explanation(st: Any, state: MutableMapping[str, Any]) -> None:
-    st.markdown(
-        """
-<div class="section-shell">
-  <h2 class="section-title">Feedback Loop and Selected-Paper Explanation</h2>
-  <p class="section-copy">
-    Record like/dislike feedback against the original recommendation run, then inspect one paper in
-    method, experiment, or limitations mode.
-  </p>
-</div>
-        """,
-        unsafe_allow_html=True,
+    _render_section_header(
+        st,
+        eyebrow="Refinement",
+        title="Feedback and Paper Explanation",
+        copy=(
+            "Apply like/dislike signals to the current ranking, then open a focused "
+            "explanation for one selected paper."
+        ),
     )
     recommendation_result = state.get("recommendation_result")
     workflow = _workflow_from_result(recommendation_result)
@@ -1292,17 +1497,14 @@ def _render_feedback_and_explanation(st: Any, state: MutableMapping[str, Any]) -
 
 
 def _render_followup_workspace(st: Any, state: MutableMapping[str, Any]) -> None:
-    st.markdown(
-        """
-<div class="section-shell">
-  <h2 class="section-title">Follow-up Queries</h2>
-  <p class="section-copy">
-    Re-query the local store by topic, category, and time range. When no local results match, the UI
-    can optionally fall back to a new retrieval call.
-  </p>
-</div>
-        """,
-        unsafe_allow_html=True,
+    _render_section_header(
+        st,
+        eyebrow="Local search",
+        title="Follow-up Queries",
+        copy=(
+            "Search stored papers by topic, category, and date range, with optional "
+            "retrieval when the local store is empty."
+        ),
     )
     today = date.today()
     with st.form("followup_form"):
@@ -1380,6 +1582,64 @@ def _render_followup_workspace(st: Any, state: MutableMapping[str, Any]) -> None
                 use_container_width=True,
                 hide_index=True,
             )
+
+
+def _render_section_header(
+    st: Any,
+    *,
+    eyebrow: str,
+    title: str,
+    copy: str,
+) -> None:
+    st.markdown(
+        f"""
+<section class="section-shell" aria-label="{escape(title)}">
+  <p class="section-kicker">{escape(eyebrow)}</p>
+  <h2 class="section-title">{escape(title)}</h2>
+  <p class="section-copy">{escape(copy)}</p>
+</section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_run_summary(st: Any, summary: Mapping[str, object]) -> None:
+    items = [
+        ("Run ID", summary["run_id"]),
+        ("Candidates", summary["candidates_retrieved"]),
+        ("Recommendations", summary["recommendations_shown"]),
+        ("Planner", summary["planner_source"]),
+        ("Fallback", summary["planner_fallback"]),
+        ("Cache", summary["cache_status"]),
+    ]
+    tiles = []
+    for label, value in items:
+        tiles.append(
+            "<div class='summary-tile'>"
+            f"<span class='summary-tile__label'>{escape(str(label))}</span>"
+            f"<span class='summary-tile__value'>{escape(str(value))}</span>"
+            "</div>"
+        )
+    st.markdown(
+        "<div class='run-summary-grid'>" + "".join(tiles) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_content_heading(st: Any, *, title: str, copy: str) -> None:
+    st.markdown(
+        f"""
+<div class="section-shell" aria-label="{escape(title)}">
+  <h2 class="section-title">{escape(title)}</h2>
+  <p class="section-copy">{escape(copy)}</p>
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _html_text(value: object) -> str:
+    return escape(str(value or "")).replace("\n", "<br>")
 
 
 def _run_recommendation_workflow(state: MutableMapping[str, Any]) -> None:
@@ -1589,7 +1849,11 @@ def _render_recommendation_diagnostics(
     st: Any,
     workflow: RecommendationWorkflow,
 ) -> None:
-    st.subheader("Recommendation Diagnostics")
+    _render_content_heading(
+        st,
+        title="Recommendation Diagnostics",
+        copy="Provider state, semantic signals, score composition, and feedback movement.",
+    )
     provider_tab, similarity_tab, score_tab, feedback_tab = st.tabs(
         [
             "Provider / Cache / Retrieval",
@@ -1631,11 +1895,22 @@ def _render_daily_briefing(st: Any, briefing: DailyBriefing) -> None:
     sections = {section["key"]: section for section in enhanced_briefing_sections(briefing)}
 
     executive = sections["executive_summary"]
-    st.subheader(str(executive["title"]))
-    st.write(executive["body"])
+    st.markdown(
+        f"""
+<section class="briefing-callout" aria-label="{escape(str(executive['title']))}">
+  <h3>{escape(str(executive["title"]))}</h3>
+  <p>{_html_text(executive["body"])}</p>
+</section>
+        """,
+        unsafe_allow_html=True,
+    )
 
     guide = sections["top_k_reading_guide"]
-    st.subheader(str(guide["title"]))
+    _render_content_heading(
+        st,
+        title=str(guide["title"]),
+        copy="Ranked papers with evidence labels and reading guidance.",
+    )
     summary_rows = guide["summary_rows"]
     if summary_rows:
         st.dataframe(summary_rows, use_container_width=True, hide_index=True)
@@ -1661,22 +1936,32 @@ def _render_daily_briefing(st: Any, briefing: DailyBriefing) -> None:
             )
 
     boundary = sections["evidence_boundary"]
-    st.subheader(str(boundary["title"]))
-    st.caption(
-        f"Full text used: {boundary['full_text_used']} | "
-        f"Evidence: {boundary['evidence_sources']} | "
-        f"Unavailable: {boundary['unavailable_sources']}"
+    st.markdown(
+        f"""
+<section class="evidence-panel" aria-label="{escape(str(boundary['title']))}">
+  <h3>{escape(str(boundary["title"]))}</h3>
+  <p class="metadata-line">
+    Full text used: {escape(str(boundary["full_text_used"]))} | Evidence: {escape(str(boundary["evidence_sources"]))} | Unavailable: {escape(str(boundary["unavailable_sources"]))}
+  </p>
+</section>
+        """,
+        unsafe_allow_html=True,
     )
     _render_list_section(st, "Boundary Notes", boundary["notes"])
     _render_list_section(st, "Explicit Abstentions", boundary["abstentions"])
 
 
 def _render_explanation(st: Any, explanation: PaperDeepExplanation) -> None:
-    st.subheader(explanation.title)
-    st.caption(
-        f"Evidence: {explanation.evidence_source.value} | Note: {explanation.evidence_note}"
+    st.markdown(
+        f"""
+<section class="explanation-panel" aria-label="{escape(explanation.title)}">
+  <h3>{escape(explanation.title)}</h3>
+  <p>{_html_text(explanation.summary)}</p>
+  <p class="metadata-line">Evidence: {escape(explanation.evidence_source.value)} | Note: {escape(explanation.evidence_note)}</p>
+</section>
+        """,
+        unsafe_allow_html=True,
     )
-    st.write(explanation.summary)
     if explanation.method is not None:
         st.markdown("**Problem**")
         st.write(explanation.method.problem)

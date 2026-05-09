@@ -31,6 +31,7 @@ from daily_arxiv_agent.llm.base import LLMProvider
 from daily_arxiv_agent.skills.arxiv_retrieval import ArxivRetrievalSkill
 from daily_arxiv_agent.skills.briefing import DailyBriefingSkill
 from daily_arxiv_agent.skills.deep_explanation import PaperDeepExplanationSkill
+from daily_arxiv_agent.skills.discovery_recommendation import DiscoveryRecommendationSkill
 from daily_arxiv_agent.skills.extraction import PaperExtractionSkill
 from daily_arxiv_agent.skills.feedback import FeedbackInput, FeedbackRefinementSkill
 from daily_arxiv_agent.skills.followup import FollowupQuery, FollowupSkill
@@ -41,6 +42,7 @@ from daily_arxiv_agent.skills.query_planning import (
     build_seed_derived_query_plan,
 )
 from daily_arxiv_agent.skills.ranking import TopicRankingSkill
+from daily_arxiv_agent.skills.research_synthesis import ResearchSynthesisSkill
 from daily_arxiv_agent.skills.semantic_seed_ranking import SemanticSeedRankingSkill
 from daily_arxiv_agent.storage import SQLitePaperStore
 
@@ -129,33 +131,47 @@ class DailyArxivAgentOrchestrator:
         query_planning_skill: QueryPlanningSkill | None = None,
         semantic_ranking_skill: SemanticSeedRankingSkill | None = None,
         deep_explanation_skill: PaperDeepExplanationSkill | None = None,
+        discovery_skill: DiscoveryRecommendationSkill | None = None,
+        synthesis_skill: ResearchSynthesisSkill | None = None,
         provider: LLMProvider | None = None,
     ) -> None:
         config = AppConfig.from_env()
-        self.store = store or SQLitePaperStore(config.db_path)
-        self.query_planning_skill = query_planning_skill or QueryPlanningSkill(
-            provider=provider
+        self.store = (
+            store
+            or (discovery_skill.store if discovery_skill is not None else None)
+            or SQLitePaperStore(config.db_path)
         )
-        self.retrieval_skill = retrieval_skill or ArxivRetrievalSkill(
+
+        self.discovery_skill = discovery_skill or DiscoveryRecommendationSkill(
             store=self.store,
-            request_delay_seconds=config.arxiv_request_delay_seconds,
-        )
-        self.ranking_skill = ranking_skill or TopicRankingSkill()
-        self.semantic_ranking_skill = semantic_ranking_skill or SemanticSeedRankingSkill(
-            store=self.store,
+            provider=provider,
             config=config,
+            query_planning_skill=query_planning_skill,
+            retrieval_skill=retrieval_skill,
+            ranking_skill=ranking_skill,
+            semantic_ranking_skill=semantic_ranking_skill,
+            feedback_skill=feedback_skill,
+            followup_skill=followup_skill,
         )
-        self.extraction_skill = extraction_skill or PaperExtractionSkill(provider=provider)
-        self.briefing_skill = briefing_skill or DailyBriefingSkill(provider=provider)
-        self.feedback_skill = feedback_skill or FeedbackRefinementSkill(store=self.store)
-        self.followup_skill = followup_skill or FollowupSkill(
-            store=self.store,
-            retrieval_skill=self.retrieval_skill,
-        )
-        self.deep_explanation_skill = deep_explanation_skill or PaperDeepExplanationSkill(
+        self.synthesis_skill = synthesis_skill or ResearchSynthesisSkill(
             provider=provider,
             store=self.store,
+            extraction_skill=extraction_skill,
+            briefing_skill=briefing_skill,
+            deep_explanation_skill=deep_explanation_skill,
         )
+
+        # Backwards-compatible aliases for tests and external callers that inject
+        # or inspect the original single-purpose Skill instances.
+        self.query_planning_skill = self.discovery_skill.query_planning_skill
+        self.retrieval_skill = self.discovery_skill.retrieval_skill
+        self.ranking_skill = self.discovery_skill.ranking_skill
+        self.semantic_ranking_skill = self.discovery_skill.semantic_ranking_skill
+        self.feedback_skill = self.discovery_skill.feedback_skill
+        self.followup_skill = self.discovery_skill.followup_skill
+        self.extraction_skill = self.synthesis_skill.extraction_skill
+        self.briefing_skill = self.synthesis_skill.briefing_skill
+        self.deep_explanation_skill = self.synthesis_skill.deep_explanation_skill
 
     def run_recommendation(
         self,

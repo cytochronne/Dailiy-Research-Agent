@@ -4,6 +4,8 @@
 
 - `src/daily_arxiv_agent/orchestrator.py`
 - `src/daily_arxiv_agent/contracts.py`
+- `src/daily_arxiv_agent/skills/discovery_recommendation.py`
+- `src/daily_arxiv_agent/skills/research_synthesis.py`
 - `src/daily_arxiv_agent/skills/query_planning.py`
 - `src/daily_arxiv_agent/skills/arxiv_retrieval.py`
 - `src/daily_arxiv_agent/skills/ranking.py`
@@ -17,7 +19,12 @@
 
 ## 1. 总体架构
 
-系统采用 Agent + Skills 架构。`DailyArxivAgentOrchestrator` 是总调度器，负责把多个单一职责 Skill 串成可追踪的工作流：
+系统采用 Agent + 两个公开 Skills 架构。`DailyArxivAgentOrchestrator` 是总调度器，公开层面主要协调：
+
+1. `DiscoveryRecommendationSkill`：负责 seed preference、query planning、arXiv retrieval、deterministic/semantic ranking、feedback refinement 和 follow-up filtering。
+2. `ResearchSynthesisSkill`：负责 recommendation extraction、daily briefing generation 和 selected-paper deep explanation。
+
+为了保持旧有功能、测试粒度和外部 import 兼容，原来的细粒度 Skill 类仍保留为公开 Skill facade 的内部子能力：
 
 1. `QueryPlanningSkill`：把用户检索意图转换成 bounded query variants。
 2. `ArxivRetrievalSkill`：调用 arXiv Atom API，解析论文元数据，写入 SQLite 缓存。
@@ -27,6 +34,8 @@
 6. `DailyBriefingSkill`：生成最终 daily briefing。
 7. `PaperDeepExplanationSkill`：对用户选中的单篇论文生成 method、experiment 或 limitations 模式的深入解释。
 8. `FollowupSkill`：优先基于本地 SQLite 中已有论文回答 follow-up query，必要时再触发 retrieval。
+
+`SeedParsingSkill` 作为 `DiscoveryRecommendationSkill` 的 seed preference 预处理子能力保留；`SemanticSeedRankingSkill` 是 ranking 子能力的一条实现路径。这个公开架构合并不移动旧实现代码，只在 facade 层收敛系统对外描述和默认装配方式。
 
 所有 Skill 的结果都使用统一的 `SkillResult` 包装，包含：
 
@@ -841,7 +850,7 @@ Trace 中每一步都会被 append：
 6. `extraction`
 7. `briefing`
 
-这些 trace metadata 已被脱敏，适合 UI 和 report 展示。
+这些 trace step 是两个公开 Skills 的内部阶段：`query_planning`、`semantic_readiness`、`arxiv_retrieval`、`ranking`、`feedback_refinement` 和 `followup_filter` 属于 `DiscoveryRecommendationSkill`；`extraction`、`briefing` 和 `deep_explanation` 属于 `ResearchSynthesisSkill`。trace metadata 已被脱敏，适合 UI 和 report 展示。
 
 ## 11. Deep explanation 流程
 

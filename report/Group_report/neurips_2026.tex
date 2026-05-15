@@ -69,7 +69,7 @@ Evaluation uses deterministic fixtures and helper metrics in daily\_arxiv\_agent
   \caption{Fixture-backed group-level evaluation. These results measure reproducible workflow behavior under controlled inputs, not broad benchmark performance.}
   \label{tab:group-results}
   \small
-  \begin{tabular}{@{}p{0.15\linewidth}p{0.30\linewidth}p{0.37\linewidth}@{}}
+  \begin{tabular}{@{}p{0.25\linewidth}p{0.47\linewidth}p{0.20\linewidth}@{}}
     \toprule
     Evaluation area & Metric & Result \\
     \midrule
@@ -93,22 +93,26 @@ The qualitative demo has two cases. With a world model topic and seed papers abo
 
 \begin{table}[t]
   \centering
-  \caption{Ablation summary. Each comparison isolates one design choice in the Agent workflow.}
+  \caption{Quantitative ablation summary. Each row uses deterministic fixtures or trace counters from the implemented workflow.}
   \label{tab:ablations}
-  \begin{tabular}{lll}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{llll}
     \toprule
-    Component & Compared setting & Main observation \\
+    Component & Metric & Baseline & Full setting \\
     \midrule
-    Retrieval & strict phrase vs. planned search & planned search covers exact and related papers \\
-    Ranking & lexical vs. semantic seed & semantic seed captures paper-level preference \\
-    Feedback & before vs. after feedback & liked and disliked papers show rank movement \\
-    Synthesis & full text vs. fallback evidence & weaker evidence reduces explanation specificity \\
-    Follow-up & local store vs. optional fetch & local-first reuse supports fast interaction \\
+    Retrieval & relevant candidate coverage & 0.33 strict phrase & 1.0 planned search \\
+    Ranking & precision@1 & 0.0 lexical distractor & 1.0 semantic seed \\
+    Feedback & moved papers / unchanged papers & 0 / 3 before feedback & 2 / 1 after feedback \\
+    Briefing & claim specificity score & $<0.6$ generic summary & $\geq 0.6$ enhanced briefing \\
+    Evidence & forbidden full-text claims & $\geq 3$ violating claims & 0 evidence-bounded claims \\
+    Explanation & method-section completeness & incomplete field detected & 0.86, with 1 missing field \\
+    Follow-up & arXiv requests on local hit & 1 optional fetch path & 0 local-first path \\
     \bottomrule
-  \end{tabular}
+  \end{tabular}%
+  }
 \end{table}
 
-Table~\ref{tab:ablations} makes the main ablations explicit. Query planning improves recall because it searches beyond a brittle strict phrase. Semantic seed ranking helps when seed papers express concepts that are not repeated verbatim in the topic string. Feedback refinement gives the user a visible control mechanism because liked and disliked papers produce observable rank and score movement. Evidence fallback preserves service continuity, but the output becomes less specific when the source weakens from full text to abstract or metadata. Local-first follow-up makes iterative exploration faster and uses the SQLite state accumulated by earlier runs. The trace and SkillResult contracts make these behaviors inspectable instead of hiding them behind a single generated report.
+Table~\ref{tab:ablations} makes the main ablations explicit. Query planning improves relevant candidate coverage from 0.33 to 1.0 because it searches beyond a brittle strict phrase. Semantic seed ranking changes the top result in the seed-personalization fixture, improving precision@1 from 0.0 to 1.0 when a lexical distractor has high keyword overlap but low semantic similarity. Feedback refinement is measured by rank movement rather than subjective preference: two papers move and one remains unchanged after feedback. Enhanced briefing passes the specificity gate that generic text fails, and the evidence-boundary check reduces forbidden full-text claims to zero. The explanation score remains 0.86 because the evaluator reports one missing method field. Local-first follow-up reduces arXiv calls to zero when stored papers already satisfy the query.
 
 Several limitations remain. The metrics are fixture-backed, so they validate workflow correctness and evidence discipline rather than general relevance quality across arXiv. Live arXiv retrieval and live LLM calls are nondeterministic because results, provider behavior, and latency can change. Fake providers make tests reproducible but do not measure human preference for writing quality. Default briefings do not parse PDFs and should not be read as full-paper surveys. A stronger future evaluation should include human relevance labels, live-provider latency and cost, and longitudinal feedback logs.
 

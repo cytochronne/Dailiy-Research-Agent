@@ -639,6 +639,9 @@ INPUT ./neurips_2026.out
 INPUT ./neurips_2026.out
 INPUT /usr/share/texlive/texmf-dist/fonts/enc/dvips/base/8r.enc
 INPUT /home/cytochrome/.texlive2021/texmf-var/fonts/pk/ljfour/jknappen/ec/ectt1000.600pk
+INPUT /usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb
+INPUT /usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb
+INPUT /usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb
 INPUT /usr/share/texlive/texmf-dist/fonts/type1/urw/times/utmb8a.pfb
 INPUT /usr/share/texlive/texmf-dist/fonts/type1/urw/times/utmr8a.pfb
 INPUT /usr/share/texlive/texmf-dist/fonts/type1/urw/times/utmri8a.pfb

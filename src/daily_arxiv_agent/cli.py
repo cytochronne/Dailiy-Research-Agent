@@ -18,6 +18,14 @@ from daily_arxiv_agent.contracts import (
     SkillResult,
     SkillStatus,
 )
+from daily_arxiv_agent.evaluation.real_arxiv import (
+    DEFAULT_REAL_ARXIV_CANDIDATES_PATH,
+    DEFAULT_REAL_ARXIV_LABELS_PATH,
+    evaluate_frozen_real_arxiv,
+    fetch_real_arxiv_candidates,
+    format_real_arxiv_report_markdown,
+    write_label_template,
+)
 from daily_arxiv_agent.orchestrator import (
     DailyArxivAgentOrchestrator,
     RECOMMENDATION_MODE_AUTO,
@@ -58,9 +66,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = _run_followup(args)
     elif args.command == "embedding-cache":
         result = _run_embedding_cache(args)
+    elif args.command == "real-eval":
+        result = _run_real_eval(args)
     else:  # pragma: no cover - argparse prevents this branch.
         parser.error(f"Unknown command: {args.command}")
-    if getattr(args, "output_format", "json") == "briefing":
+    if (
+        args.command == "real-eval"
+        and getattr(args, "real_eval_command", None) == "run"
+        and getattr(args, "output_format", "json") == "markdown"
+        and result.data is not None
+    ):
+        print(format_real_arxiv_report_markdown(result.data))
+    elif getattr(args, "output_format", "json") == "briefing":
         print(compact_briefing_output(result))
     else:
         print(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
@@ -189,6 +206,57 @@ def _build_parser() -> argparse.ArgumentParser:
     clear_cache.add_argument("--db-path", default=config.db_path)
     clear_cache.add_argument("--scope", choices=["global", "profile"])
     clear_cache.add_argument("--profile-id")
+
+    real_eval = subparsers.add_parser(
+        "real-eval",
+        help="Run or refresh the frozen small real-arXiv evaluation.",
+    )
+    real_eval_subparsers = real_eval.add_subparsers(
+        dest="real_eval_command",
+        required=True,
+    )
+    run_real_eval = real_eval_subparsers.add_parser(
+        "run",
+        help="Evaluate frozen real-arXiv candidates and labels.",
+    )
+    _add_real_eval_paths(run_real_eval)
+    run_real_eval.add_argument(
+        "--format",
+        choices=["json", "markdown"],
+        default="json",
+        dest="output_format",
+        help="Output full JSON or a compact Markdown metrics table.",
+    )
+    run_real_eval.add_argument(
+        "--semantic-provider",
+        choices=["fake", "live", "none"],
+        default="none",
+        help=(
+            "Embedding provider for semantic_agent. none keeps the default "
+            "offline comparison to lexical rankers; fake is deterministic; "
+            "live uses EMBEDDING_* environment configuration."
+        ),
+    )
+    label_template = real_eval_subparsers.add_parser(
+        "label-template",
+        help="Write a JSONL human-label template from frozen candidates.",
+    )
+    _add_real_eval_paths(label_template)
+    fetch_candidates = real_eval_subparsers.add_parser(
+        "fetch-candidates",
+        help="Refresh frozen candidates from live arXiv.",
+    )
+    fetch_candidates.add_argument(
+        "--candidates-path",
+        type=Path,
+        default=DEFAULT_REAL_ARXIV_CANDIDATES_PATH,
+    )
+    fetch_candidates.add_argument(
+        "--store-path",
+        type=Path,
+        default=Path("data/daily_arxiv_eval.sqlite3"),
+    )
+    fetch_candidates.add_argument("--request-delay-seconds", type=float, default=3.0)
     return parser
 
 
@@ -205,6 +273,19 @@ def _add_common_filters(parser: argparse.ArgumentParser) -> None:
             "Compatibility result limit for strict/follow-up workflows. "
             "For demo candidate gathering, prefer --candidate-pool-size."
         ),
+    )
+
+
+def _add_real_eval_paths(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--candidates-path",
+        type=Path,
+        default=DEFAULT_REAL_ARXIV_CANDIDATES_PATH,
+    )
+    parser.add_argument(
+        "--labels-path",
+        type=Path,
+        default=DEFAULT_REAL_ARXIV_LABELS_PATH,
     )
 
 
@@ -268,6 +349,27 @@ def _run_embedding_cache(args: argparse.Namespace) -> SkillResult[dict[str, int]
             "profile_id": args.profile_id,
         },
     )
+
+
+def _run_real_eval(args: argparse.Namespace) -> Any:
+    if args.real_eval_command == "run":
+        return evaluate_frozen_real_arxiv(
+            candidates_path=args.candidates_path,
+            labels_path=args.labels_path,
+            semantic_provider=args.semantic_provider,
+        )
+    if args.real_eval_command == "label-template":
+        return write_label_template(
+            candidates_path=args.candidates_path,
+            output_path=args.labels_path,
+        )
+    if args.real_eval_command == "fetch-candidates":
+        return fetch_real_arxiv_candidates(
+            output_path=args.candidates_path,
+            store_path=args.store_path,
+            request_delay_seconds=args.request_delay_seconds,
+        )
+    raise ValueError(f"Unknown real-eval command: {args.real_eval_command}")
 
 
 def _build_orchestrator(args: argparse.Namespace) -> DailyArxivAgentOrchestrator:

@@ -20,6 +20,12 @@ env/
 *.sqlite3
 *.db
 data/
+!data/
+data/*
+!data/evaluation/
+data/evaluation/*
+!data/evaluation/real_arxiv_candidates.jsonl
+!data/evaluation/real_arxiv_labels.jsonl
 outputs/
 
 dist/

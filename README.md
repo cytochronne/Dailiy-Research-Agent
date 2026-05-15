@@ -561,10 +561,35 @@ Unit 8 adds lightweight, deterministic evaluation helpers and final course demo 
 - `daily_arxiv_agent.evaluation.metrics.evaluate_recommendation_fixture`
 - `daily_arxiv_agent.evaluation.metrics.evaluate_feedback_movement`
 - `daily_arxiv_agent.evaluation.metrics.check_explanation_completeness`
+- `daily_arxiv_agent.evaluation.real_arxiv.evaluate_frozen_real_arxiv`
 - `docs/demo/final-demo-script.md`
 - `docs/demo/evaluation-summary.md`
 
 The evaluation helpers return the same `SkillResult` envelope used by the rest of the project, so malformed fixtures produce structured errors instead of breaking the demo path.
+
+The project also includes a small frozen real-arXiv ranking evaluation under
+`data/evaluation/`. It uses three topics, 50 recent candidates per topic, and
+binary human relevance labels. The default evaluation is offline and compares
+the Agent ranker against strict keyword and BM25 baselines with precision@5,
+recall@10, and MRR:
+
+```bash
+conda run -n daily-arxiv-agent daily-arxiv-agent real-eval run --format markdown
+```
+
+For a stronger semantic comparison, use the configured live embedding provider:
+
+```bash
+conda run -n daily-arxiv-agent daily-arxiv-agent real-eval run --semantic-provider live --format markdown
+```
+
+Refreshing the candidate snapshot is explicit because live arXiv results are
+non-deterministic and rate-limited:
+
+```bash
+conda run -n daily-arxiv-agent daily-arxiv-agent real-eval fetch-candidates
+conda run -n daily-arxiv-agent daily-arxiv-agent real-eval label-template
+```
 
 Example recommendation overlap check:
 

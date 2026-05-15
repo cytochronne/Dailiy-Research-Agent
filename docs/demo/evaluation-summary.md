@@ -15,6 +15,54 @@ Unit 8 adds deterministic helpers in `daily_arxiv_agent.evaluation.metrics`. The
 | Explanation completeness | `check_explanation_completeness(...)` | present and missing required sections for method, experiment, and limitations explanations |
 | Enhanced briefing quality | `evaluate_briefing_quality(...)` | required enhanced sections, Top-K brief coverage, trend status, reading priorities, evidence boundary, claim specificity, claim-support coverage, and forbidden full-text/PDF claims |
 
+## Frozen Real-arXiv Ranking Evaluation
+
+The repository includes a small frozen real-arXiv evaluation in `data/evaluation/`.
+It is separate from the deterministic workflow fixtures: the fixture tests verify
+contract behavior, while this frozen set gives a small external relevance check.
+The candidate snapshot contains three topics, 50 candidates per topic, and one
+binary human relevance label per candidate.
+
+Run it with:
+
+```bash
+conda run -n daily-arxiv-agent daily-arxiv-agent real-eval run --format markdown
+```
+
+The live semantic comparison uses the configured embedding provider:
+
+```bash
+conda run -n daily-arxiv-agent daily-arxiv-agent real-eval run --semantic-provider live --format markdown
+```
+
+Current frozen-snapshot metrics with live `embedding-3` semantic ranking:
+
+| Topic | Method | Precision@5 | Recall@10 | MRR | Relevant |
+|-------|--------|-------------|-----------|-----|----------|
+| llm_tool_agents | agent | 0.400 | 0.667 | 0.333 | 6 |
+| llm_tool_agents | semantic_agent | 0.600 | 0.500 | 1.000 | 6 |
+| llm_tool_agents | strict_keyword | 0.400 | 0.500 | 1.000 | 6 |
+| llm_tool_agents | bm25 | 0.400 | 0.833 | 1.000 | 6 |
+| retrieval_augmented_generation | agent | 1.000 | 1.000 | 1.000 | 6 |
+| retrieval_augmented_generation | semantic_agent | 0.800 | 0.667 | 1.000 | 6 |
+| retrieval_augmented_generation | strict_keyword | 1.000 | 1.000 | 1.000 | 6 |
+| retrieval_augmented_generation | bm25 | 1.000 | 1.000 | 1.000 | 6 |
+| vision_language_robotics | agent | 0.800 | 0.833 | 1.000 | 6 |
+| vision_language_robotics | semantic_agent | 0.800 | 1.000 | 1.000 | 6 |
+| vision_language_robotics | strict_keyword | 0.800 | 0.667 | 1.000 | 6 |
+| vision_language_robotics | bm25 | 1.000 | 1.000 | 1.000 | 6 |
+| macro_average | agent | 0.733 | 0.833 | 0.778 | 18 |
+| macro_average | semantic_agent | 0.733 | 0.722 | 1.000 | 18 |
+| macro_average | strict_keyword | 0.733 | 0.722 | 1.000 | 18 |
+| macro_average | bm25 | 0.800 | 0.944 | 1.000 | 18 |
+
+Candidate refresh and labeling are manual steps, not part of CI:
+
+```bash
+conda run -n daily-arxiv-agent daily-arxiv-agent real-eval fetch-candidates
+conda run -n daily-arxiv-agent daily-arxiv-agent real-eval label-template
+```
+
 ## Deterministic Demo Fixtures
 
 The fixture-backed recommendation demo uses `tests/fixtures/arxiv_atom_response.xml`.
@@ -165,6 +213,7 @@ Targeted Unit 8 check:
 
 ```bash
 conda run -n daily-arxiv-agent python -m pytest tests/test_evaluation.py
+conda run -n daily-arxiv-agent python -m pytest tests/test_real_arxiv_evaluation.py
 ```
 
 Historical Unit 8 implementation result: `9 passed`.

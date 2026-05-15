@@ -12,12 +12,11 @@
 
 \graphicspath{{./}{report/DiscoveryRecommendationSkill/}}
 
-\title{DiscoveryRecommendationSkill: Individual Report Outline}
+\title{DiscoveryRecommendationSkill for Daily arXiv Paper Recommendation}
 
 \author{%
-  Skill Author: \textit{Replace with name} \\
-  Social Network Analysis, Spring 2026 \\
-  \texttt{Replace with email or GitHub handle}
+  Yanzhe Xie \\
+  Social Network Analysis, Spring 2026
 }
 
 \begin{document}
@@ -25,147 +24,100 @@
 \maketitle
 
 \begin{abstract}
-This outline is structured for the required three-page NeurIPS-format individual Skill report. It focuses on \texttt{DiscoveryRecommendationSkill}, the recommendation-side Skill that transforms user interest signals into arXiv query plans, candidate papers, ranked recommendations, feedback-adjusted rankings, and follow-up results. The final report should explicitly cover functionality, references, results, analysis, and visualization.
+DiscoveryRecommendationSkill is the recommendation component of the Daily arXiv Research Briefing Agent. It converts user interests, arXiv categories, date constraints, seed papers, and feedback into query plans, candidate pools, ranked recommendations, and local follow-up results. The Skill represents papers, topics, categories, seed preferences, retrieval runs, and feedback events as linked elements in an academic information network. It separates candidate generation from ranking, uses structured output contracts, and returns explicit statuses for success, empty, fallback, and error cases. The evaluation combines deterministic fixture tests with a frozen real-arXiv ranking study that compares deterministic ranking, semantic ranking, and BM25 under short keyword topics and longer intent-style topics.
 \end{abstract}
 
 \section{Functionality}
 
-\paragraph{Skill purpose.}
-Define \texttt{DiscoveryRecommendationSkill} as the Skill responsible for finding and ranking papers before synthesis. It answers: which papers should be recommended, why are they ranked highly, and how should the recommendation adapt after seed papers or user feedback?
+Daily arXiv discovery is a filtering task over a fast-changing stream of papers. A user rarely provides a fully specified retrieval query. The input more often contains a topic phrase, an arXiv category, a date range, seed papers, or feedback from previous recommendations. DiscoveryRecommendationSkill maps these signals into a ranked reading list before the synthesis Skill writes a daily briefing. In network terms, the Skill connects user interests to papers through categories, seed-paper relations, retrieval provenance, ranking rationales, and feedback events. The output consists of a QueryPlan, PaperMetadata records, Top-K Recommendation rows with scores and rationales, feedback rank movement, and FollowupSkill results over the local paper store.
 
-\paragraph{Inputs.}
-List the exact input types:
-\begin{itemize}
-  \item \texttt{RetrievalQuery}: topic, category, date range, result budget, search mode, and query-planner mode.
-  \item Seed papers: arXiv IDs, arXiv URLs, or title text used to build a \texttt{SeedPreference}.
-  \item Profile state: saved seed preferences and historical like/dislike feedback.
-  \item Follow-up query: local-first filters over stored papers, with optional arXiv fetch when local results are empty.
-\end{itemize}
+The Skill serves as a public facade over smaller implementation units. SeedParsingSkill builds a SeedPreference from arXiv IDs, arXiv URLs, and title strings. QueryPlanningSkill expands a RetrievalQuery into required terms, optional terms, phrases, categories, and bounded query variants. ArxivRetrievalSkill queries the arXiv Atom API when cache reuse is insufficient, parses metadata, and writes retrieval runs to SQLite. TopicRankingSkill ranks candidates with lexical, phrase, category, recency, retrieval-source, seed, and feedback signals. SemanticSeedRankingSkill checks embedding readiness and compares seed and candidate representations. FeedbackRefinementSkill records paper-level like or dislike events and returns rank and score deltas. FollowupSkill first searches stored papers and fetches from arXiv only when local results are empty.
 
-\paragraph{Outputs.}
-Describe the structured outputs:
-\texttt{QueryPlan}, cached \texttt{PaperMetadata}, Top-K \texttt{Recommendation} rows with rank, score, rationale, evidence label, score breakdown, feedback rank deltas, and \texttt{SkillResult} statuses for success, empty, fallback, and error cases.
+Figure~\ref{fig:skill1-workflow} shows the Skill boundary and the main data relations. The design keeps inputs and outputs explicit because the downstream ResearchSynthesisSkill must identify whether a claim is supported by metadata, an abstract, ranking evidence, or later full-text extraction. This separation prevents weak retrieval evidence from being presented as paper-level analysis.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.88\linewidth]{skill1.png}
-  \caption{Planned individual-report visualization: DiscoveryRecommendationSkill workflow from user interest signals to query planning, retrieval, ranking, feedback refinement, and follow-up filtering.}
+  \caption{DiscoveryRecommendationSkill workflow. User interests are linked to query plans, retrieved arXiv metadata, ranked recommendations, feedback-adjusted rankings, and local-first follow-up results.}
   \label{fig:skill1-workflow}
 \end{figure}
 
-\section{Method and implementation}
+\section{Method}
 
-\paragraph{Query planning and retrieval.}
-Explain that the Skill uses a query planner to expand user input into controlled arXiv query variants. In deterministic or fallback mode, the planner preserves required terms; in live mode, invalid LLM query plans fall back to deterministic planning. Retrieval uses the arXiv Atom API, normalizes metadata, and stores papers in SQLite for cache reuse.
+The Skill first constructs a RetrievalQuery from the topic, category, date range, search mode, and retrieval budget. Query planning then controls how the request reaches arXiv. In deterministic mode, the planner preserves required topic terms and builds conservative query variants. In automatic or live-assisted mode, an LLM planner may propose broader terms, but invalid or divergent plans fall back to deterministic planning. This guard prevents recall-oriented expansion from changing the intent of the user.
 
-\paragraph{Ranking.}
-Describe two ranking paths:
-\begin{itemize}
-  \item Deterministic ranking combines topic/query-plan matches, phrases, category/date context, seed preference, retrieval source metadata, and feedback events.
-  \item Semantic seed ranking checks embedding readiness, computes seed-candidate similarity, and fails closed when real embedding credentials or seed quality are insufficient.
-\end{itemize}
-State that each recommendation includes a rationale so the downstream briefing can expose why a paper was selected.
+Retrieval uses the arXiv Atom API and stores normalized metadata in SQLite. The cache contains papers and run-scoped retrieval metadata, including query variants and source positions, which makes candidate generation repeatable for the same effective query. Ranking is a separate stage. The deterministic ranker assigns each candidate a weighted score from term overlap, phrase matches, category agreement, recency, query-source evidence, seed preference text, and feedback events. Each recommendation includes a score breakdown and a rationale, which allows the user to inspect why a paper appears near the top.
 
-\paragraph{Feedback and follow-up.}
-Explain that feedback is paper-level like/dislike. The Skill records feedback events, applies latest-wins conflict handling, and returns rank/score movement after refinement. Follow-up queries search local SQLite papers first and call arXiv only when no stored papers match and fetching is allowed.
+The semantic path targets cases in which exact keywords are insufficient. It builds a seed representation from seed papers or topic-derived preference text, checks embedding configuration and seed quality, embeds seed and candidate metadata, and ranks candidates by cosine similarity with bounded lexical, category, and recency support. If semantic readiness fails, the Skill returns a structured error rather than treating deterministic ranking as semantic ranking. Feedback is paper-level: the Skill records each like or dislike event and reports the previous rank, new rank, score delta, and rank delta.
 
-\section{References and related work}
+\section{Related Work}
 
-Use this section to ground the Skill in information retrieval and recommender-system methods:
-\begin{itemize}
-  \item arXiv API retrieval as the source of scholarly metadata \citep{arxivapi}.
-  \item Classical information retrieval and ranked retrieval metrics such as precision, recall, and MRR \citep{manning2008}.
-  \item Hybrid content-based recommendation for combining topic, category, seed, and feedback signals \citep{burke2002}.
-  \item Sentence embedding similarity for semantic seed recommendation \citep{reimers2019}.
-\end{itemize}
+The Skill follows standard ranked retrieval practice. Access to arXiv metadata uses the arXiv API \citep{arxivapi}. The evaluation reports precision, recall, and mean reciprocal rank, which are common ranked retrieval measures \citep{manning2008}. The ranking design is a hybrid content-based recommender because it combines topic text, category constraints, seed papers, retrieval provenance, and user feedback \citep{burke2002}. The semantic path follows sentence embedding retrieval, where related documents are compared in a vector space rather than only through exact word overlap \citep{reimers2019}. The broader Agent uses retrieval-augmented generation ideas, but this Skill stops at discovery and recommendation. Synthesis and full-paper explanation remain separate downstream responsibilities \citep{lewis2020}.
 
 \section{Results}
 
-Report deterministic offline results from the search-quality fixture and the Unit 8 evaluation helpers. Make clear that the goal is repeatable Skill validation, not a large-scale benchmark claim.
+The evaluation has two layers. The first layer uses deterministic fixtures to verify Skill behavior under controlled inputs. Broad planned retrieval covers all expected relevant candidates in the search-quality fixture and ranks the three relevant papers in the top three, giving precision@3, recall@3, and MRR of 1.0. Rationale coverage is also 1.0. The feedback test reports rank and score movement after user feedback, and the local follow-up test returns stored matches without an arXiv request when SQLite already contains relevant papers.
+
+The second layer uses a frozen real-arXiv ranking set with three topics, 50 recent candidates per topic, and binary human relevance labels. A paper is labeled relevant when the title or abstract matches the intended research need of the topic rather than only repeating an isolated keyword. Table~\ref{tab:skill1-results} reports macro averages. Short keyword topics favor lexical retrieval because many relevant papers share query words with the topic. In this setting, BM25 gives the strongest precision@5 and recall@10. The deterministic Agent ranker remains competitive but has lower MRR because the first relevant paper is not always ranked first. The semantic Agent with a live embedding model improves MRR to 1.0 but does not exceed the recall of BM25.
 
 \begin{table}[t]
   \centering
-  \caption{Planned DiscoveryRecommendationSkill results table.}
+  \caption{DiscoveryRecommendationSkill ranking results. The real-arXiv rows report macro averages over three topics and 150 frozen candidates.}
   \label{tab:skill1-results}
-  \begin{tabular}{lll}
+  \small
+  \begin{tabular}{@{}lllll@{}}
     \toprule
-    Evaluation & Metric & Fixture-backed result \\
+    Setting & Method & Precision@5 & Recall@10 & MRR \\
     \midrule
-    Broad planned search & relevant candidate coverage & 1.0 \\
-    Top-K ranking & precision@3 / recall@3 / MRR & 1.0 / 1.0 / 1.0 \\
-    Explanation support & rationale coverage & 1.0 \\
-    Semantic seed ablation & lexical baseline precision@K & 0.0 \\
-    Semantic seed ablation & semantic precision@K & 1.0 \\
-    Feedback refinement & reported output & rank and score movement \\
+    Fixture search & Planned retrieval and ranking & 1.000 & 1.000 & 1.000 \\
+    Short topic & Deterministic Agent & 0.733 & 0.833 & 0.778 \\
+    Short topic & Semantic Agent & 0.733 & 0.722 & 1.000 \\
+    Short topic & BM25 & 0.800 & 0.944 & 1.000 \\
+    Intent topic & Deterministic Agent & 0.600 & 0.556 & 0.667 \\
+    Intent topic & Semantic Agent & 0.733 & 0.722 & 0.750 \\
+    Intent topic & BM25 & 0.467 & 0.611 & 0.833 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-\paragraph{Qualitative demo results.}
-Use the presentation example: with topic ``world model'' and seed papers about ``world action model,'' the recommendations concentrate on robotics-related world-model papers. In the profile-only demo, historical seed papers and feedback drive recommendations toward robotics and deep learning without a fresh topic.
+To test whether semantic ranking helps when a query expresses intent rather than exact keywords, the frozen evaluation is rerun with longer paraphrased topics. For example, retrieval-augmented generation is expressed as question answering that consults external documents, grounds claims in evidence, attaches citations, and avoids unsupported statements. In this setting, Semantic Agent reaches macro precision@5 of 0.733 and recall@10 of 0.722, while BM25 drops to 0.467 and 0.611. This result supports the intended semantic use case, where user interests are closer to research intent than to paper-title keywords.
 
 \section{Analysis}
 
-\paragraph{What works and why.}
-Argue that broad query planning improves candidate recall over strict phrase retrieval; seed papers and semantic similarity make recommendations more personalized; rationales and score breakdowns make ranking inspectable; feedback refinement gives users visible control; and local-first follow-up makes interaction faster and more contextual.
+The results show that the strongest behavior of the Skill depends on the input regime. When the topic is a short keyword phrase such as retrieval augmented generation or vision-language robotic manipulation, BM25 is a strong baseline because words in titles and abstracts overlap directly with the query. This outcome is not a weakness of the evaluation; it is a useful sanity check. A recommender should not claim semantic superiority when lexical matching already solves the task well.
 
-\paragraph{Ablations and failure cases.}
-Include the following analyses in the final report:
-\begin{itemize}
-  \item Strict phrase retrieval versus broad planned retrieval.
-  \item Lexical-only baseline versus semantic seed ranking.
-  \item Before/after feedback movement for liked and disliked papers.
-  \item Local follow-up hit versus empty local store with optional fetch.
-\end{itemize}
-Discuss failure behavior: invalid query plans fall back, empty retrieval returns structured empty results, semantic mode fails closed, and provider payloads or raw vectors are not exposed in traces.
+The intent-topic experiment gives a clearer view of semantic ranking. In that setting, exact query words no longer cover all relevant papers, and the live embedding path improves both precision@5 and recall@10 over BM25. The improvement is most visible for evidence-grounded generation and open-vocabulary robotic manipulation. The LLM/tool-agent topic remains harder because the label space mixes embodied agents, software agents, benchmark agents, and multi-agent reinforcement learning. A stronger version should use seed papers rather than topic text alone, because seed abstracts define the target subfield more precisely than a long natural-language query.
 
-\section{Page allocation for the final three-page report}
-
-\begin{table}[h]
-  \centering
-  \caption{Suggested three-page allocation. References do not count toward the page limit.}
-  \label{tab:skill1-page-plan}
-  \begin{tabular}{ll}
-    \toprule
-    Page target & Content \\
-    \midrule
-    Page 1 & Functionality, inputs/outputs, Figure~\ref{fig:skill1-workflow} \\
-    Page 2 & Method, implementation details, related work \\
-    Page 3 & Results, ablations, limitations, StudyClawHub metadata \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-\section*{Checklist before finalizing}
-
-\begin{itemize}
-  \item Replace author placeholders and add the published StudyClawHub Skill URL.
-  \item Keep the final individual report at three pages before references.
-  \item Include at least one visualization; Figure~\ref{fig:skill1-workflow} satisfies the requirement.
-  \item Keep recommendation evidence separate from abstract/full-text evidence.
-\end{itemize}
+The ablations also identify practical failure modes. Query expansion improves coverage only when planner outputs preserve required terms. Semantic ranking depends on embedding configuration and seed quality, so readiness checks and fail-closed behavior are necessary. Feedback refinement reports rank movement, but a few events cannot replace a well-labeled preference profile. Local-first follow-up reduces latency and arXiv calls, but it depends on sufficient local papers. Future work should add more topics, seed-paper labels, annotation checks, and longitudinal feedback logs.
 
 \begin{thebibliography}{9}
 
 \bibitem[arXiv(2026)]{arxivapi}
 arXiv.
 \newblock arXiv API User Manual.
-\newblock \url{https://info.arxiv.org/help/api/index.html}.
+\newblock \url{https://info.arxiv.org/help/api/user-manual.html}.
 
 \bibitem[Burke(2002)]{burke2002}
 Robin Burke.
 \newblock Hybrid recommender systems: Survey and experiments.
-\newblock \emph{User Modeling and User-Adapted Interaction}, 12:331--370, 2002.
+\newblock User Modeling and User-Adapted Interaction, 12:331--370, 2002.
+\newblock \url{https://doi.org/10.1023/A:1021240730564}.
+
+\bibitem[Lewis et~al.(2020)]{lewis2020}
+Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Kuettler, Mike Lewis, Wen-tau Yih, Tim Rocktaschel, Sebastian Riedel, and Douwe Kiela.
+\newblock Retrieval-augmented generation for knowledge-intensive NLP tasks.
+\newblock Advances in Neural Information Processing Systems 33, pages 9459--9474, 2020.
 
 \bibitem[Manning et~al.(2008)]{manning2008}
 Christopher D. Manning, Prabhakar Raghavan, and Hinrich Schutze.
-\newblock \emph{Introduction to Information Retrieval}.
-\newblock Cambridge University Press, 2008.
+\newblock Introduction to Information Retrieval.
+\newblock Cambridge University Press, Cambridge, England, 2008.
 
 \bibitem[Reimers and Gurevych(2019)]{reimers2019}
 Nils Reimers and Iryna Gurevych.
 \newblock Sentence-BERT: Sentence embeddings using Siamese BERT-networks.
-\newblock \emph{EMNLP-IJCNLP}, 2019.
+\newblock Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing, pages 3982--3992, 2019.
+\newblock \url{https://doi.org/10.18653/v1/D19-1410}.
 
 \end{thebibliography}
 

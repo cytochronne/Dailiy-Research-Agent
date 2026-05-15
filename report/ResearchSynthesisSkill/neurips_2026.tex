@@ -1,0 +1,167 @@
+\documentclass{article}
+
+\usepackage[main, final]{neurips_2026}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{xcolor}
+
+\graphicspath{{./}{report/ResearchSynthesisSkill/}}
+
+\title{ResearchSynthesisSkill: Individual Report Outline}
+
+\author{%
+  Skill Author: \textit{Replace with name} \\
+  Social Network Analysis, Spring 2026 \\
+  \texttt{Replace with email or GitHub handle}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This outline is structured for the required three-page NeurIPS-format individual Skill report. It focuses on \texttt{ResearchSynthesisSkill}, the synthesis-side Skill that turns ranked arXiv recommendations into structured daily briefings and selected-paper explanations while preserving explicit evidence boundaries. The final report should explicitly cover functionality, references, results, analysis, and visualization.
+\end{abstract}
+
+\section{Functionality}
+
+\paragraph{Skill purpose.}
+Define \texttt{ResearchSynthesisSkill} as the Skill that explains and summarizes the papers selected by the recommendation-side Skill. It answers: what does each recommended paper contribute, why should the user read it, how do the Top-K papers compare, and what evidence supports each generated claim?
+
+\paragraph{Inputs.}
+List the inputs consumed from the Agent workflow:
+\begin{itemize}
+  \item Top-K \texttt{Recommendation} rows with rank, score, paper metadata, evidence source, and ranking rationale.
+  \item Candidate-pool context, \texttt{QueryPlan}, \texttt{RetrievalQuery}, retrieval metadata, and ranking metadata.
+  \item Optional selected paper, explanation mode, cached full text, or user-provided full text for deep explanation.
+\end{itemize}
+
+\paragraph{Outputs.}
+Describe the outputs: \texttt{PaperBriefingItem}, \texttt{DailyBriefing}, \texttt{PaperDeepExplanation}, evidence-bound claims, reading priorities, Top-K comparisons, trend overview, and a structured evidence boundary. State explicitly that the default daily briefing does not claim PDF or full-text evidence unless full text is actually available for selected-paper explanation.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\linewidth]{skill2.png}
+  \caption{Planned individual-report visualization: ResearchSynthesisSkill consumes ranked recommendations and produces paper extraction items, enhanced daily briefings, and selected-paper deep explanations with evidence labels.}
+  \label{fig:skill2-workflow}
+\end{figure}
+
+\section{Method and implementation}
+
+\paragraph{Per-paper extraction.}
+Explain that \texttt{extract\_paper(...)} converts each recommendation into a structured \texttt{PaperBriefingItem}: summary, contributions, methods, relevance rationale, problem, approach, reading guide, and evidence-bound claims. Provider failures produce deterministic fallback items rather than dropping the paper.
+
+\paragraph{Daily briefing generation.}
+Explain that \texttt{generate\_briefing(...)} combines extraction results, candidate-pool context, query-plan context, and ranking metadata into an enhanced \texttt{DailyBriefing}. The briefing contains an executive summary, summary table, highlighted paper, paper-level items, trend overview, Top-K comparisons, reading priorities, and evidence boundary.
+
+\paragraph{Selected-paper deep explanation.}
+Explain that \texttt{explain\_paper(...)} supports \texttt{method}, \texttt{experiment}, and \texttt{limitations} modes. It prefers full text when supplied or cached; otherwise it falls back to abstract, then metadata. Each fallback is explicitly labeled so the user can distinguish full-paper analysis from abstract-only or metadata-only output.
+
+\section{References and related work}
+
+Use this section to position the Skill relative to evidence-grounded summarization:
+\begin{itemize}
+  \item Retrieval-augmented generation motivates separating retrieval evidence from generated synthesis \citep{lewis2020}.
+  \item Faithfulness work in summarization motivates evidence labels and forbidden full-text claims \citep{maynez2020}.
+  \item Hallucination surveys motivate explicit abstentions and source boundaries when evidence is missing \citep{ji2023}.
+  \item arXiv metadata and abstracts define the default evidence available to the briefing \citep{arxivapi}.
+\end{itemize}
+
+\section{Results}
+
+Report deterministic offline results from the enhanced briefing and explanation evaluators. The final report should state that the evaluation checks structural completeness, evidence discipline, and mode-specific coverage rather than subjective writing quality.
+
+\begin{table}[t]
+  \centering
+  \caption{Planned ResearchSynthesisSkill results table.}
+  \label{tab:skill2-results}
+  \begin{tabular}{lll}
+    \toprule
+    Evaluation & Metric & Fixture-backed result \\
+    \midrule
+    Daily briefing & required-section coverage & 1.0 \\
+    Daily briefing & Top-K coverage & 1.0 \\
+    Daily briefing & evidence boundary present & yes \\
+    Daily briefing & forbidden full-text claims & none in passing run \\
+    Deep explanation & method-mode completeness & 0.86 \\
+    Fallback behavior & malformed or missing evidence & structured result \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Qualitative demo results.}
+Use the presentation example: after the recommendation Skill selects papers, this Skill generates a daily briefing with an executive summary, summary table, per-paper items, reading priorities, and evidence boundary. For a selected paper, it can explain the method, experiment, or limitations rather than producing one generic summary.
+
+\section{Analysis}
+
+\paragraph{What works and why.}
+Argue that the Skill improves usefulness because it turns Top-K rows into reading decisions. Evidence labels reduce hallucination risk, Top-K comparisons make recommendations easier to compare, reading priorities help users decide what to read first, and mode-specific explanations expose missing information instead of hiding it inside a generic paragraph.
+
+\paragraph{Ablations and error analysis.}
+Include these analyses in the final report:
+\begin{itemize}
+  \item Enhanced briefing versus generic summary: the evaluator fails generic text even when sections exist.
+  \item Default briefing with and without forbidden full-text claims: PDF/full-text claims are rejected unless full-text evidence was used.
+  \item Full-text explanation versus abstract/metadata fallback.
+  \item Explanation completeness by mode, with the 0.86 method-mode result showing one intentionally missing required field.
+\end{itemize}
+
+\paragraph{Limitations.}
+State the limits plainly: default daily briefings are based on metadata, abstracts, ranking evidence, and candidate-pool context; full-text analysis is only for selected-paper explanation; fake-provider results test structure rather than human preference; and current explanation completeness does not measure factual correctness beyond available evidence labels.
+
+\section{Page allocation for the final three-page report}
+
+\begin{table}[h]
+  \centering
+  \caption{Suggested three-page allocation. References do not count toward the page limit.}
+  \label{tab:skill2-page-plan}
+  \begin{tabular}{ll}
+    \toprule
+    Page target & Content \\
+    \midrule
+    Page 1 & Functionality, inputs/outputs, Figure~\ref{fig:skill2-workflow} \\
+    Page 2 & Method, evidence boundary, related work \\
+    Page 3 & Results, ablations, limitations, StudyClawHub metadata \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section*{Checklist before finalizing}
+
+\begin{itemize}
+  \item Replace author placeholders and add the published StudyClawHub Skill URL.
+  \item Keep the final individual report at three pages before references.
+  \item Include at least one visualization; Figure~\ref{fig:skill2-workflow} satisfies the requirement.
+  \item Do not present abstract-only or metadata-only output as full-paper analysis.
+\end{itemize}
+
+\begin{thebibliography}{9}
+
+\bibitem[arXiv(2026)]{arxivapi}
+arXiv.
+\newblock arXiv API User Manual.
+\newblock \url{https://info.arxiv.org/help/api/index.html}.
+
+\bibitem[Ji et~al.(2023)]{ji2023}
+Ziwei Ji, Nayeon Lee, Rita Frieske, Tiezheng Yu, Dan Su, Yan Xu, Etsuko Ishii, Ye Jin Bang, Andrea Madotto, and Pascale Fung.
+\newblock Survey of hallucination in natural language generation.
+\newblock \emph{ACM Computing Surveys}, 55(12), 2023.
+
+\bibitem[Lewis et~al.(2020)]{lewis2020}
+Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Kuettler, Mike Lewis, Wen-tau Yih, Tim Rocktaschel, Sebastian Riedel, and Douwe Kiela.
+\newblock Retrieval-augmented generation for knowledge-intensive NLP tasks.
+\newblock \emph{NeurIPS}, 2020.
+
+\bibitem[Maynez et~al.(2020)]{maynez2020}
+Joshua Maynez, Shashi Narayan, Bernd Bohnet, and Ryan McDonald.
+\newblock On faithfulness and factuality in abstractive summarization.
+\newblock \emph{ACL}, 2020.
+
+\end{thebibliography}
+
+\end{document}

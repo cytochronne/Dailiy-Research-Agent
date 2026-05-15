@@ -1,0 +1,15 @@
+# Fdb version 3
+["pdflatex"] 1778827778 "/home/cytochrome/pan1/Dailiy-Research-Agent/report/ResearchSynthesisSkill/neurips_2026.tex" "neurips_2026.pdf" "neurips_2026" 1778827778
+  "/etc/texmf/web2c/texmf.cnf" 1778161409 475 c0e671620eb5563b2130f56340a5fde8 ""
+  "/home/cytochrome/pan1/Dailiy-Research-Agent/report/ResearchSynthesisSkill/neurips_2026.tex" 1778827777 18954 d589ccf50b17cb196f8985740243c493 ""
+  "/usr/share/texlive/texmf-dist/tex/latex/base/article.cls" 1636758526 20144 8a7de377ae7a11ee924a7499611f5a9d ""
+  "/usr/share/texlive/texmf-dist/tex/latex/base/size10.clo" 1636758526 8448 96f18c76bf608a36ee6fbf021ac1dd32 ""
+  "/usr/share/texlive/texmf-dist/web2c/texmf.cnf" 1644012257 39432 7155514e09a3d69036fac785183a21c2 ""
+  "/usr/share/texmf/web2c/texmf.cnf" 1644012257 39432 7155514e09a3d69036fac785183a21c2 ""
+  "/var/lib/texmf/web2c/pdftex/pdflatex.fmt" 1778161418 1435818 ce483725597151a592c5648466b143d8 ""
+  "neurips_2026.aux" 1778827778 32 3985256e7290058c681f74d7a3565a19 ""
+  "neurips_2026.sty" 0 -1 0 ""
+  "neurips_2026.tex" 1778827777 18954 d589ccf50b17cb196f8985740243c493 ""
+  (generated)
+  "neurips_2026.log"
+  "neurips_2026.pdf"

@@ -1,0 +1,151 @@
+\documentclass{article}
+
+\usepackage[main, final]{neurips_2026}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{xcolor}
+
+\graphicspath{{./}{report/Group_report/}}
+
+\title{Daily arXiv Research Briefing Agent}
+
+\author{%
+  Group Report \\
+  Social Network Analysis, Spring 2026
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Daily arXiv Research Briefing Agent is a local Agent and Skills system for personalized paper discovery. Given a topic, optional arXiv category, date range, seed papers, feedback, or a follow-up query, the Agent retrieves candidate papers, ranks them with topic, seed, semantic, and feedback signals, and produces an evidence-aware daily briefing. The system integrates two independently testable public Skills. DiscoveryRecommendationSkill handles query planning, retrieval, recommendation, feedback refinement, and local-first follow-up filtering. ResearchSynthesisSkill handles structured paper extraction, briefing generation, and selected-paper explanation. A shared SQLite layer stores metadata, retrieval runs, seed preferences, feedback events, full-text cache rows, and embedding cache rows. Fixture-based evaluation gives precision@3, recall@3, MRR, rationale coverage, required-section coverage, and Top-K briefing coverage of 1.0. These results show reproducible workflow quality rather than large-scale benchmark superiority.
+\end{abstract}
+
+\section{Functionality}
+
+Researchers face a daily filtering problem because arXiv publishes more papers than a user can inspect manually. This project turns a compact research interest into a ranked reading list, a structured daily briefing, and follow-up explanations with explicit evidence labels. The Agent treats topics, arXiv categories, papers, seed papers, user profiles, feedback events, and recommendation rationales as links in an academic information network. It therefore follows the course requirement for an Agent and Skills system: independent modules communicate through structured data, while the orchestrator composes them into one workflow.
+
+The main entry point is DailyArxivAgentOrchestrator. It accepts requests from the command line interface or the Streamlit user interface and supports topic keywords, arXiv category, submitted-date range, Top-K size, seed papers, profile preferences, like or dislike feedback, follow-up queries, selected-paper explanation mode, and provider configuration. Its output is a RecommendationWorkflow with candidate papers, ranked recommendations, extracted briefing items, the final daily briefing, and a workflow trace. Each trace step records status, evidence source, fallback state, input and output summaries, and structured errors, so the user can inspect how the Agent reaches each result.
+
+The user-facing outputs cover three workflows. The Agent generates a daily briefing with an executive summary, summary table, highlighted paper, Top-K paper notes, comparisons, reading priorities, and evidence boundary. It records feedback and returns a refined ranking with rank and score movement. It also supports follow-up filtering over locally stored papers and fetches from arXiv only when local results are empty and the workflow allows retrieval.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{overview.png}
+  \caption{Agent architecture. DailyArxivAgentOrchestrator coordinates two public Skills through structured contracts and a shared SQLite state layer. DiscoveryRecommendationSkill handles query planning, retrieval, ranking, feedback, and follow-up. ResearchSynthesisSkill handles extraction, briefing, and selected-paper explanation.}
+  \label{fig:agent-architecture}
+\end{figure}
+
+\section{Agent Design}
+
+Figure~\ref{fig:agent-architecture} shows the implemented architecture. The orchestrator coordinates Skills, records workflow traces, and preserves the shared result contract. DiscoveryRecommendationSkill wraps seed parsing, query planning, arXiv retrieval, deterministic ranking, semantic seed ranking, feedback refinement, and follow-up filtering. ResearchSynthesisSkill wraps per-paper extraction, daily briefing generation, and selected-paper deep explanation. The older fine-grained Skills remain available internally, which keeps testing precise while presenting the deliverable as a clean Agent with two public Skill boundaries.
+
+The workflow begins by building a RetrievalQuery. When seed papers are provided, SeedParsingSkill converts arXiv IDs, arXiv URLs, or titles into a SeedPreference. QueryPlanningSkill creates a QueryPlan with required terms, optional terms, phrases, categories, and query variants. Invalid LLM-assisted plans fall back to deterministic planning before retrieval. ArxivRetrievalSkill calls the arXiv Atom API when needed, parses metadata, and caches normalized PaperMetadata records in SQLite.
+
+Ranking has two paths. The deterministic path combines topic matches, query-plan terms, phrases, category and date context, seed preference text, retrieval provenance, and feedback events. The semantic seed path checks embedding readiness, fails closed when configuration is unsafe, and otherwise compares seed and candidate embeddings while retaining lexical, category, and recency signals. Both paths output Recommendation rows with rank, score, rationale, evidence source, and score breakdown.
+
+ResearchSynthesisSkill consumes the Top-K recommendations rather than retrieving or reranking papers. PaperExtractionSkill creates PaperBriefingItem records with summaries, contribution claims, method cues, relevance rationales, and reading guidance. DailyBriefingSkill combines those items with candidate-pool, query-plan, retrieval, and ranking context. PaperDeepExplanationSkill supports method, experiment, and limitations modes. It prefers full text when available, then falls back to abstract or metadata with explicit labels, preventing weak evidence from being presented as full-paper analysis.
+
+SQLitePaperStore stores paper metadata, retrieval runs, seed preferences, feedback events, full-text cache rows, and embedding cache rows. This shared layer keeps the two public Skills independent. All public methods return SkillResult objects with success, empty, fallback, or error status, so the CLI, UI, tests, and report use the same interpretation of output and failure cases.
+
+\section{Related Work}
+
+The project builds on scholarly information retrieval, recommender systems, semantic similarity, and evidence-grounded generation. arXiv metadata access follows the arXiv API \citep{arxivapi}. The recommendation design follows ranked retrieval practice by reporting precision, recall, and mean reciprocal rank, and by separating candidate generation from ranking \citep{manning2008}. It also follows hybrid recommender-system ideas, where topic, category, content, seed papers, and user feedback provide complementary signals \citep{burke2002}. Semantic seed ranking follows sentence embedding similarity, where related texts are represented in a vector space so that seed papers can personalize ranking beyond exact keyword overlap \citep{reimers2019}.
+
+The synthesis side follows retrieval-augmented generation, where generated text is conditioned on retrieved evidence and exposes the boundary between source material and generation \citep{lewis2020}. Faithfulness research in summarization shows that fluent summaries may contain unsupported claims, so the Agent treats evidence labels and abstentions as part of the output contract \citep{maynez2020}.
+
+\section{Results}
+
+Evaluation uses deterministic fixtures and helper metrics in daily\_arxiv\_agent.evaluation.metrics. The goal is to verify reproducibility, output coverage, measurable ranking and feedback effects, and evidence discipline, not to claim state-of-the-art recommendation quality. The main search-quality fixture contains exact, related, weak, and unrelated candidates for multimodal LLM agents for robotic manipulation.
+
+\begin{table}[t]
+  \centering
+  \caption{Fixture-backed group-level evaluation. These results measure reproducible workflow behavior under controlled inputs, not broad benchmark performance.}
+  \label{tab:group-results}
+  \small
+  \begin{tabular}{@{}p{0.15\linewidth}p{0.30\linewidth}p{0.37\linewidth}@{}}
+    \toprule
+    Evaluation area & Metric & Result \\
+    \midrule
+    Search quality & relevant candidate coverage & 1.0 \\
+    Recommendation & precision@3 / recall@3 / MRR & 1.0 / 1.0 / 1.0 \\
+    Ranking explainability & rationale coverage & 1.0 \\
+    Daily briefing & required-section coverage & 1.0 \\
+    Daily briefing & Top-K coverage & 1.0 \\
+    Daily briefing & forbidden full-text claims & none \\
+    Deep explanation & method-mode completeness & 0.86 \\
+    Full project tests & pytest result & 195 passed \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:group-results} summarizes the main results. Broad planned search reaches relevant candidate coverage of 1.0 and ranks the three expected relevant papers in Top-K, giving precision@3, recall@3, and MRR of 1.0. Rationale coverage of 1.0 means every recommendation carries an inspectable explanation. The briefing evaluator reports required-section and Top-K coverage of 1.0 and rejects forbidden full-text claims. The method-mode explanation score is 0.86 because the fixture intentionally omits one required method field, which the evaluator reports rather than hiding inside generic text.
+
+The qualitative demo has two cases. With a world model topic and seed papers about world action models, recommendations shift toward robotics-oriented world-model papers. With no fresh topic, the stored profile uses saved seeds and feedback to produce recommendations aligned with robotics and deep learning. These cases show that the Agent is more than a stateless arXiv search wrapper: it remembers preference signals and exposes their ranking effects.
+
+\section{Analysis}
+
+\begin{table}[t]
+  \centering
+  \caption{Ablation summary. Each comparison isolates one design choice in the Agent workflow.}
+  \label{tab:ablations}
+  \begin{tabular}{lll}
+    \toprule
+    Component & Compared setting & Main observation \\
+    \midrule
+    Retrieval & strict phrase vs. planned search & planned search covers exact and related papers \\
+    Ranking & lexical vs. semantic seed & semantic seed captures paper-level preference \\
+    Feedback & before vs. after feedback & liked and disliked papers show rank movement \\
+    Synthesis & full text vs. fallback evidence & weaker evidence reduces explanation specificity \\
+    Follow-up & local store vs. optional fetch & local-first reuse supports fast interaction \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:ablations} makes the main ablations explicit. Query planning improves recall because it searches beyond a brittle strict phrase. Semantic seed ranking helps when seed papers express concepts that are not repeated verbatim in the topic string. Feedback refinement gives the user a visible control mechanism because liked and disliked papers produce observable rank and score movement. Evidence fallback preserves service continuity, but the output becomes less specific when the source weakens from full text to abstract or metadata. Local-first follow-up makes iterative exploration faster and uses the SQLite state accumulated by earlier runs. The trace and SkillResult contracts make these behaviors inspectable instead of hiding them behind a single generated report.
+
+Several limitations remain. The metrics are fixture-backed, so they validate workflow correctness and evidence discipline rather than general relevance quality across arXiv. Live arXiv retrieval and live LLM calls are nondeterministic because results, provider behavior, and latency can change. Fake providers make tests reproducible but do not measure human preference for writing quality. Default briefings do not parse PDFs and should not be read as full-paper surveys. A stronger future evaluation should include human relevance labels, live-provider latency and cost, and longitudinal feedback logs.
+
+Overall, the Agent satisfies the project requirements. It integrates public Skills into a coherent workflow, defines clear inputs and outputs, reports results and ablations, provides visualization, and preserves the central evidence boundary: users can see which claims come from metadata, abstracts, rankings, candidate-pool context, or full text.
+
+\begin{thebibliography}{9}
+
+\bibitem[arXiv(2026)]{arxivapi}
+arXiv.
+\newblock arXiv API User Manual.
+\newblock \url{https://info.arxiv.org/help/api/index.html}.
+
+\bibitem[Burke(2002)]{burke2002}
+Robin Burke.
+\newblock Hybrid recommender systems: Survey and experiments.
+\newblock \emph{User Modeling and User-Adapted Interaction}, 12:331--370, 2002.
+
+\bibitem[Lewis et~al.(2020)]{lewis2020}
+Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Kuettler, Mike Lewis, Wen-tau Yih, Tim Rocktaschel, Sebastian Riedel, and Douwe Kiela.
+\newblock Retrieval-augmented generation for knowledge-intensive NLP tasks.
+\newblock \emph{NeurIPS}, 2020.
+
+\bibitem[Manning et~al.(2008)]{manning2008}
+Christopher D. Manning, Prabhakar Raghavan, and Hinrich Schutze.
+\newblock \emph{Introduction to Information Retrieval}.
+\newblock Cambridge University Press, 2008.
+
+\bibitem[Maynez et~al.(2020)]{maynez2020}
+Joshua Maynez, Shashi Narayan, Bernd Bohnet, and Ryan McDonald.
+\newblock On faithfulness and factuality in abstractive summarization.
+\newblock \emph{ACL}, 2020.
+
+\bibitem[Reimers and Gurevych(2019)]{reimers2019}
+Nils Reimers and Iryna Gurevych.
+\newblock Sentence-BERT: Sentence embeddings using Siamese BERT-networks.
+\newblock \emph{EMNLP-IJCNLP}, 2019.
+
+\end{thebibliography}
+
+\end{document}
